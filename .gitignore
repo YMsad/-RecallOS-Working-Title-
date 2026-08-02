@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Environment variables
+.env
+.env.*
+!env.example
+
+# API Keys
+*.key
+*.pem
+credentials.json
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# AI Models
+models/
+*.gguf
+*.bin
+*.onnx
+
+# Frontend
+node_modules/
+dist/
+.next/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated files
+*.apkg
+
+# Logs
+*.log
+logs/
+
+# Ollama local models
+.ollama/
+
+# PyInstaller
+*.spec
