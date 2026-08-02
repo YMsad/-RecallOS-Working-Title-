@@ -15,7 +15,7 @@ venv/
 # Environment variables
 .env
 .env.*
-!env.example
+!.env.example
 
 # API Keys
 *.key
@@ -26,6 +26,7 @@ credentials.json
 *.db
 *.sqlite
 *.sqlite3
+data/*.db
 
 # AI Models
 models/

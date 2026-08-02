@@ -212,17 +212,3 @@ DeepSeek - 让高质量AI触手可及
 "真正的学习，不是收集知识，而是内化知识。"
 
 RecallOS - 让你真正搞懂。
-
-text
-
----
-
-### ✅ 你只需要做
-
-1. **打开 `README.md`**，全选删除，粘贴上面这段
-2. **保存**
-3. **提交推送**：
-```bash
-git add README.md
-git commit -m "docs: 更新 README 与实际项目结构同步"
-git push
