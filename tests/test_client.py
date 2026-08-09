@@ -71,6 +71,54 @@ def test_max_tokens_is_sent() -> None:
     assert seen[0]["model"] == "deepseek-chat"
 
 
+def test_default_max_tokens_cap_is_sent() -> None:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return ok_body()
+
+    with make_client(handler) as client:
+        client.chat([{"role": "user", "content": "hi"}])
+    assert seen[0]["max_tokens"] == 2000
+
+
+def test_usage_is_recorded() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "prompt_cache_hit_tokens": 40,
+                    "prompt_cache_miss_tokens": 60,
+                },
+            },
+        )
+
+    with make_client(handler) as client:
+        client.chat([{"role": "user", "content": "hi"}])
+        client.chat([{"role": "user", "content": "hi"}])
+
+    assert len(client.usage_records) == 2
+    summary = client.usage_summary()
+    assert summary["requests"] == 2
+    assert summary["prompt_tokens"] == 200
+    assert summary["completion_tokens"] == 100
+    assert summary["prompt_cache_hit_tokens"] == 80
+    assert summary["total_tokens"] == 300
+
+
+def test_usage_ignored_when_absent() -> None:
+    with make_client(lambda request: ok_body()) as client:
+        client.chat([{"role": "user", "content": "hi"}])
+    assert client.usage_records == []
+    assert client.usage_summary() == {"requests": 1}
+
+
 def test_retries_then_succeeds_on_429() -> None:
     calls = {"n": 0}
 

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # DeepSeek API
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
 
     # HTTP behaviour
     request_timeout: float = 60.0

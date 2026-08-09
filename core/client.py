@@ -69,6 +69,9 @@ class DeepSeekClient:
             timeout=httpx.Timeout(self.settings.request_timeout),
             transport=transport,
         )
+        self.usage_records: list[dict[str, Any]] = []
+        self.total_usage: dict[str, int] = {}
+        self.request_count = 0
 
     def close(self) -> None:
         self._client.close()
@@ -85,7 +88,7 @@ class DeepSeekClient:
         self,
         messages: list[dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int | None = None,
+        max_tokens: int = 2000,
         model: str | None = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
@@ -101,7 +104,7 @@ class DeepSeekClient:
         self,
         messages: list[dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int | None = None,
+        max_tokens: int = 2000,
         model: str | None = None,
     ) -> dict[str, Any]:
         """POST /chat/completions with retry logic. Returns the parsed JSON body."""
@@ -116,7 +119,10 @@ class DeepSeekClient:
         last_error: DeepSeekError | None = None
         for attempt in range(1, self.settings.max_retries + 1):
             try:
-                return self._post("/chat/completions", payload)
+                body = self._post("/chat/completions", payload)
+                self.request_count += 1
+                self._record_usage(body)
+                return body
             except DeepSeekError as exc:
                 if not self._is_retryable(exc):
                     raise
@@ -129,6 +135,23 @@ class DeepSeekClient:
         raise last_error  # type: ignore[misc]
 
     # ------------------------------------------------------------- internals
+
+    def _record_usage(self, body: dict[str, Any]) -> None:
+        """Accumulate per-request token usage from the API response."""
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            return
+        self.usage_records.append(usage)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                self.total_usage[key] = self.total_usage.get(key, 0) + value
+        logger.info("Token usage: %s", usage)
+
+    def usage_summary(self) -> dict[str, int]:
+        """Aggregated token usage across all completed chat requests."""
+        summary = {"requests": self.request_count}
+        summary.update(self.total_usage)
+        return summary
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         logger.debug("POST %s payload=%s", path, payload)
