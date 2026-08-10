@@ -11,7 +11,19 @@ collects widget states. The app itself is unaffected in a real browser.
 
 from __future__ import annotations
 
+import pytest
 from streamlit.runtime.scriptrunner import ScriptRunnerEvent
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_config(tmp_path, monkeypatch):
+    """Point ~/.recallos/config.json at a per-test temp file."""
+    from core import config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / ".recallos")
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / ".recallos" / "config.json")
+    config.reset_settings_cache()
+    yield
 
 
 def _install_queue_clear(original_init):

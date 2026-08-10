@@ -85,6 +85,40 @@ def test_app_boots_to_home() -> None:
     assert "今天想弄懂什么" in markdown_text(at)
 
 
+def test_app_shows_key_setup_when_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("core.config.CONFIG_FILE", tmp_path / "cfg.json")
+    monkeypatch.setattr("core.config.CONFIG_DIR", tmp_path)
+    from core.config import Settings
+
+    monkeypatch.setattr("core.config.Settings", lambda: Settings(_env_file=None))
+    from core import config
+
+    config.reset_settings_cache()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert "请配置 DeepSeek API Key" in markdown_text(at)
+    assert len(at.text_input) == 1
+    assert at.text_input[0].label == "DeepSeek API Key"
+
+
+def test_app_save_key_returns_to_home(monkeypatch, tmp_path) -> None:
+    cfg = tmp_path / "cfg.json"
+    monkeypatch.setattr("core.config.CONFIG_FILE", cfg)
+    monkeypatch.setattr("core.config.CONFIG_DIR", tmp_path)
+    from core.config import Settings
+
+    monkeypatch.setattr("core.config.Settings", lambda: Settings(_env_file=None))
+    from core import config
+
+    config.reset_settings_cache()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("sk-app-saved")
+    at = click_by_label(at, "保存")
+    assert not at.exception
+    assert "请配置 DeepSeek API Key" not in markdown_text(at)
+    assert config.get_api_key_from_config() == "sk-app-saved"
+
+
 def test_app_full_flow(monkeypatch) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=30).run()

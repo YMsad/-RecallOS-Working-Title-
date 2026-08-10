@@ -8,10 +8,14 @@ from __future__ import annotations
 import streamlit as st
 
 from core import (
+    DeepSeekAuthError,
     DeepSeekError,
     LearningSession,
     SessionError,
+    get_settings,
     init_db,
+    reset_settings_cache,
+    save_api_key_to_config,
 )
 from core.database import (
     get_all_concepts,
@@ -73,6 +77,8 @@ def render_home() -> None:
                 st.session_state.messages = [{"role": "assistant", "text": question}]
                 st.session_state.step = "learning"
                 st.rerun()
+            except DeepSeekAuthError:
+                st.error("Key 无效，请重新输入")
             except DeepSeekError as exc:
                 st.error(f"AI 调用失败：{exc}")
 
@@ -117,6 +123,9 @@ def render_learning() -> None:
                 nxt = session.next_question()
                 if nxt:
                     st.session_state.messages.append({"role": "assistant", "text": nxt})
+        except DeepSeekAuthError:
+            st.session_state.messages.append(
+                {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
         except (DeepSeekError, SessionError) as exc:
             st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
 
@@ -133,6 +142,9 @@ def render_connections() -> None:
     try:
         if not session.recommended_connections:
             session.get_connections()
+    except DeepSeekAuthError:
+        st.error("Key 无效，请重新输入")
+        return
     except DeepSeekError as exc:
         st.error(f"连接推荐失败：{exc}")
         return
@@ -248,6 +260,30 @@ def render_history() -> None:
 
 # ---------------------------------------------------------------------- main
 
+def _api_key_configured() -> bool:
+    return bool(get_settings().deepseek_api_key)
+
+
+def render_api_key_setup() -> None:
+    """Show a password field + save button when no API key is configured yet."""
+    st.markdown("<h1 style='text-align:center;color:#6B6B6B;font-size:20px'>📚 RecallOS</h1>",
+                unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;font-size:24px'>首次使用，请配置 DeepSeek API Key</p>",
+                unsafe_allow_html=True)
+    st.caption("Key 只会保存在本机 ~/.recallos/config.json，不会上传。")
+
+    api_key = st.text_input("DeepSeek API Key", type="password",
+                            placeholder="sk-...", key="api_key_input")
+    if st.button("保存", type="primary", use_container_width=True):
+        key = (api_key or "").strip()
+        if not key:
+            st.error("Key 不能为空")
+            return
+        save_api_key_to_config(key)
+        reset_settings_cache()
+        st.rerun()
+
+
 def inject_css() -> None:
     st.markdown(
         """<style>
@@ -268,6 +304,10 @@ def main() -> None:
     st.set_page_config(page_title="RecallOS", page_icon="📚", layout="centered")
     init_db()
     inject_css()
+
+    if not _api_key_configured():
+        render_api_key_setup()
+        return
 
     with st.sidebar:
         st.markdown("### RecallOS")

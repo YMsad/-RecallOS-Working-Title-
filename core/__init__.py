@@ -11,7 +11,13 @@ from core.client import (
     DeepSeekNetworkError,
     DeepSeekRateLimitError,
 )
-from core.config import Settings, get_settings
+from core.config import (
+    Settings,
+    get_api_key_from_config,
+    get_settings,
+    reset_settings_cache,
+    save_api_key_to_config,
+)
 from core.database import configure, init_db
 from core.models import (
     MASTERY_LEARNING,
@@ -51,6 +57,9 @@ __all__ = [
     "DeepSeekNetworkError",
     "Settings",
     "get_settings",
+    "get_api_key_from_config",
+    "save_api_key_to_config",
+    "reset_settings_cache",
     "database",
     "configure",
     "init_db",

@@ -8,7 +8,8 @@ import pytest
 
 from cli import main as cli_main
 from core import database
-from core.client import DeepSeekError
+from core.client import DeepSeekAuthError, DeepSeekError
+from core.config import get_api_key_from_config, reset_settings_cache
 
 
 class FakeClient:
@@ -170,3 +171,65 @@ def test_history_invalid_number(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main(["--history"])
     assert "无效输入" in capsys.readouterr().out
+
+
+class PingClient:
+    """Minimal client that answers the API-key validation ping."""
+
+    def __enter__(self) -> "PingClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def chat(self, messages, **kwargs) -> str:
+        return "连通"
+
+
+def no_key_env(monkeypatch, tmp_path):
+    """Simulate a machine with no key: empty .env + empty config file."""
+    from core.config import Settings
+
+    monkeypatch.setattr("core.config.CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr("core.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("core.config.Settings", lambda: Settings(_env_file=None))
+    reset_settings_cache()
+
+
+def test_cli_prompts_for_key_when_missing(monkeypatch, capsys, tmp_path) -> None:
+    no_key_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_main, "DeepSeekClient", lambda: PingClient())
+    inputs = iter(["sk-cli-saved", "q"])
+    prompts: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(inputs)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    cli_main.main([])
+    assert any("DeepSeek API Key" in p for p in prompts)
+    assert get_api_key_from_config() == "sk-cli-saved"
+
+
+def test_cli_reprompts_on_invalid_key(monkeypatch, capsys, tmp_path) -> None:
+    no_key_env(monkeypatch, tmp_path)
+    state = {"failed": False}
+
+    def flaky_client():
+        class FlakyClient(PingClient):
+            def chat(self, messages, **kwargs) -> str:
+                if not state["failed"]:
+                    state["failed"] = True
+                    raise DeepSeekAuthError("Authentication failed (HTTP 401)")
+                return "连通"
+
+        return FlakyClient()
+
+    monkeypatch.setattr(cli_main, "DeepSeekClient", flaky_client)
+    inputs = iter(["sk-bad", "sk-good", "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    cli_main.main([])
+    out = capsys.readouterr().out
+    assert "Key 无效，请重新输入" in out
+    assert get_api_key_from_config() == "sk-good"

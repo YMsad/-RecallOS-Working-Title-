@@ -11,11 +11,15 @@ import argparse
 import sys
 
 from core import (
+    DeepSeekAuthError,
     DeepSeekClient,
     DeepSeekError,
     LearningSession,
     SessionError,
+    get_settings,
     init_db,
+    reset_settings_cache,
+    save_api_key_to_config,
 )
 from core.database import (
     get_all_concepts,
@@ -152,6 +156,35 @@ def _history() -> None:
             print("无效输入，请输入列表中的编号。")
 
 
+def _ensure_api_key() -> bool:
+    """Ensure an API key is configured; prompt, persist and validate if missing.
+
+    Returns True when a key is ready, False when the user quits.
+    """
+    if get_settings().deepseek_api_key:
+        return True
+    while True:
+        try:
+            line = input("请输入你的 DeepSeek API Key:").strip()
+        except (KeyboardInterrupt, EOFError):
+            return False
+        if not line:
+            continue
+        save_api_key_to_config(line)
+        reset_settings_cache()
+        try:
+            with DeepSeekClient() as client:
+                client.chat(
+                    [{"role": "user", "content": "请只回复两个字：连通"}], max_tokens=10
+                )
+            return True
+        except DeepSeekAuthError:
+            print("Key 无效，请重新输入")
+            continue
+        except DeepSeekError:
+            return True
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="RecallOS", description="把学习变成思考")
     parser.add_argument("--history", action="store_true", help="回顾历史学习记录")
@@ -166,6 +199,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.history:
         _history()
     else:
+        if not _ensure_api_key():
+            return
         _learn()
 
 
