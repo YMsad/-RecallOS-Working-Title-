@@ -51,6 +51,20 @@ class SessionError(Exception):
     """Raised when a session method is called out of order."""
 
 
+def warmup_concept(
+    title: str,
+    source_text: str,
+    *,
+    client: DeepSeekClient | None = None,
+) -> str:
+    """Give a 1-2 sentence plain-language intro for a concept, without needing a
+    full session. Used by the home page's 预热 button before a session starts."""
+    prompt = warmup_prompt(title=title, source_text=source_text)
+    c = client or DeepSeekClient()
+    reply = c.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+    return reply.strip()
+
+
 class LearningSession:
     """One Socratic learning session for a single concept."""
 
@@ -103,9 +117,7 @@ class LearningSession:
         already known. Does not require the session to be started."""
         if self.mode != "beginner":
             return ""
-        prompt = warmup_prompt(title=self.title, source_text=self.source_text)
-        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
-        return reply.strip()
+        return warmup_concept(self.title, self.source_text, client=self.client)
 
     def next_question(self) -> str | None:
         """Return the current question, or None once learning has finished."""
@@ -360,4 +372,4 @@ class LearningSession:
         return "\n".join(lines)
 
 
-__all__ = ["LearningSession", "SessionError"]
+__all__ = ["LearningSession", "SessionError", "warmup_concept"]

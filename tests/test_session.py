@@ -11,7 +11,7 @@ from core import database
 from core.client import DeepSeekClient
 from core.config import Settings
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
-from core.session import LearningSession, SessionError
+from core.session import LearningSession, SessionError, warmup_concept
 
 TEST_SETTINGS = Settings(
     deepseek_api_key="test-key",
@@ -276,6 +276,20 @@ def test_warmup_skipped_for_advanced_mode() -> None:
     session.mode = "advanced"
     assert session.warmup() == ""
     assert session._current_question is None
+
+
+def test_warmup_concept_standalone_function() -> None:
+    transport = ScriptedTransport(
+        [text_reply("机会成本就是你为了得到A而放弃的B。")]
+    )
+    client = DeepSeekClient(
+        settings=TEST_SETTINGS, transport=httpx.MockTransport(transport.handler)
+    )
+    warmup = warmup_concept("机会成本", "原文：选择意味着放弃", client=client)
+    assert warmup == "机会成本就是你为了得到A而放弃的B。"
+    payload = transport.requests[0]["messages"][1]["content"]
+    assert "预热" in payload
+    assert "用一句话说" in payload
 
 
 def test_cognitive_contrast_used_in_beginner_layers() -> None:
