@@ -245,3 +245,27 @@ def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app) -> N
     assert current_step(at) == "learning"
     assert "用一句话说" in markdown_text(at)
     assert "开场问题" in markdown_text(at)
+
+
+def test_app_reconfigure_dialog_opens(configured_app) -> None:
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "重新配置 API Key")
+    assert not at.exception
+    assert current_step(at) == "reconfigure"
+    assert any(t.label == "新的 DeepSeek API Key" for t in at.text_input)
+    assert any("保存并重新加载" in (b.label or "") for b in at.button)
+
+
+def test_app_reconfigure_saves_new_key_and_returns_home(configured_app) -> None:
+    from core import config
+
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "重新配置 API Key")
+    key_input = next(t for t in at.text_input if t.label == "新的 DeepSeek API Key")
+    key_input.input("sk-new-key-123")
+    at = at.run()
+    at = click_by_label(at, "保存并重新加载")
+    assert not at.exception
+    assert config.get_api_key_from_config() == "sk-new-key-123"
+    assert current_step(at) == "home"

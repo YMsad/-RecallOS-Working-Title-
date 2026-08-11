@@ -64,13 +64,13 @@ def fresh_db(tmp_path):
 
 
 def make_session(*responses: httpx.Response, title="机会成本",
-                 source="原文：选择意味着放弃", max_fail=3):
+                 source="原文：选择意味着放弃", max_fail=3, mode="beginner"):
     transport = ScriptedTransport(list(responses))
     client = DeepSeekClient(
         settings=TEST_SETTINGS, transport=httpx.MockTransport(transport.handler)
     )
     session = LearningSession(
-        title, source, client=client, max_consecutive_failures=max_fail
+        title, source, client=client, max_consecutive_failures=max_fail, mode=mode
     )
     return session, transport
 
@@ -366,3 +366,47 @@ def test_connections_skip_unmatched_titles() -> None:
     conns = session.get_connections()
     assert len(conns) == 1
     assert database.get_all_connections() == []  # nothing persisted
+
+
+# ------------------------------------------------------- V0.2.1 thinking models
+
+
+def test_route_layer4_uses_analogy() -> None:
+    session, _ = make_session(text_reply("Q1"))
+    assert session._route_model(4) == "analogy"
+
+
+def test_route_beginner_uses_scenario() -> None:
+    session, _ = make_session(text_reply("Q1"))
+    assert session._route_model(1) == "scenario"
+    assert session._route_model(2) == "scenario"
+    assert session._route_model(3) == "scenario"
+
+
+def test_route_advanced_streak_uses_first_principles() -> None:
+    session, _ = make_session(text_reply("Q1"), mode="advanced")
+    assert session._route_model(1) == "first_principles"
+
+
+def test_route_advanced_after_failure_uses_golden_circle() -> None:
+    session, _ = make_session(text_reply("Q1"), mode="advanced")
+    session.consecutive_failures = 1
+    assert session._route_model(1) == "golden_circle"
+
+
+def test_route_advanced_uncertain_uses_golden_circle() -> None:
+    session, _ = make_session(text_reply("Q1"), mode="advanced")
+    session.marked_uncertain = True
+    assert session._route_model(2) == "golden_circle"
+
+
+def test_question_payload_includes_routed_model() -> None:
+    session, transport = make_session(
+        text_reply("Q1"), judge(True, "对"), text_reply("Q2"), mode="advanced"
+    )
+    session.start()
+    session.submit_answer("答")
+    payload = next(
+        p for p in transport.requests if "第二层追问" in p["messages"][1]["content"]
+    )
+    assert "思维模型【第一性原理】" in payload["messages"][1]["content"]

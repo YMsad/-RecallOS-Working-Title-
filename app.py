@@ -347,6 +347,26 @@ def render_api_key_setup() -> None:
         st.rerun()
 
 
+def render_reconfigure() -> None:
+    """Dedicated page to replace the current API key. Saves, resets cache, returns home."""
+    st.markdown("<h1 style='text-align:center;color:#6B6B6B;font-size:20px'>📚 RecallOS</h1>",
+                unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;font-size:24px'>🔑 重新配置 API Key</p>",
+                unsafe_allow_html=True)
+    st.caption("新 Key 会覆盖本机 ~/.recallos/config.json 中保存的旧 Key，保存后自动返回首页。")
+
+    new_key = st.text_input("新的 DeepSeek API Key", type="password",
+                            placeholder="sk-...", key="reconfigure_key_input")
+    if st.button("保存并重新加载", type="primary", use_container_width=True):
+        key = (new_key or "").strip()
+        if not key:
+            st.error("Key 不能为空")
+            return
+        save_api_key_to_config(key)
+        reset_settings_cache()
+        go_home()
+
+
 def inject_css() -> None:
     st.markdown(
         """<style>
@@ -378,6 +398,8 @@ def main() -> None:
             go_home()
         if st.button("📚 历史回顾"):
             _navigate("history")
+        if st.button("🔑 重新配置 API Key"):
+            _navigate("reconfigure")
 
     step = st.session_state.get("step", "home")
     if step == "learning":
@@ -388,6 +410,8 @@ def main() -> None:
         render_summary()
     elif step == "history":
         render_history()
+    elif step == "reconfigure":
+        render_reconfigure()
     else:
         render_home()
 
