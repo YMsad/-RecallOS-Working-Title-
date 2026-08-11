@@ -36,6 +36,7 @@ from core.prompts import (
     summary_prompt,
     validate_response,
     validate_response_list,
+    warmup_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,15 @@ class LearningSession:
         self._current_question = self._generate_opening_question()
         logger.info("Session started for concept %s (id=%s)", self.title, self.concept_id)
         return self._current_question
+
+    def warmup(self) -> str:
+        """Give a 1-2 sentence plain-language intro (zero-basis pre-warm), or '' if
+        already known. Does not require the session to be started."""
+        if self.mode != "beginner":
+            return ""
+        prompt = warmup_prompt(title=self.title, source_text=self.source_text)
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        return reply.strip()
 
     def next_question(self) -> str | None:
         """Return the current question, or None once learning has finished."""
@@ -279,6 +289,7 @@ class LearningSession:
             qa_history=self._format_history(),
             related_concepts=related,
             mode=self.mode,
+            cognitive_contrast=self.mode == "beginner" and layer in (2, 3),
         )
         reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         return reply.strip()

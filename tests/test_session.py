@@ -262,6 +262,65 @@ def test_opening_question_is_tailored_to_level_and_interest() -> None:
     assert "兴趣" in opening_payload
 
 
+def test_warmup_returns_plain_text_for_beginner_mode() -> None:
+    session, transport = make_session(text_reply("机会成本就是你为了得到A而放弃的B。"))
+    warmup = session.warmup()
+    assert warmup == "机会成本就是你为了得到A而放弃的B。"
+    warmup_payload = transport.requests[0]["messages"][1]["content"]
+    assert "预热" in warmup_payload
+    assert "用一句话说" in warmup_payload
+
+
+def test_warmup_skipped_for_advanced_mode() -> None:
+    session, _ = make_session()
+    session.mode = "advanced"
+    assert session.warmup() == ""
+    assert session._current_question is None
+
+
+def test_cognitive_contrast_used_in_beginner_layers() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        judge(True, "对"),
+        text_reply("Q2"),
+        judge(True, "对"),
+        text_reply("Q3"),
+        judge(True, "对"),
+        text_reply("Q4"),
+        judge(True, "对"),
+    )
+    session.start()
+    for _ in range(3):
+        session.submit_answer("答")
+    layer2_payload = next(
+        p for p in transport.requests if "第二层追问" in p["messages"][1]["content"]
+    )
+    assert "认知反差" in layer2_payload["messages"][1]["content"]
+    layer3_payload = next(
+        p for p in transport.requests if "第三层追问" in p["messages"][1]["content"]
+    )
+    assert "认知反差" in layer3_payload["messages"][1]["content"]
+    layer4_payload = next(
+        p for p in transport.requests if "第四层追问" in p["messages"][1]["content"]
+    )
+    assert "认知反差" not in layer4_payload["messages"][1]["content"]
+
+
+def test_cognitive_contrast_not_used_in_advanced_mode() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        judge(True, "对"),
+        text_reply("Q2"),
+    )
+    session.mode = "advanced"
+    session.start()
+    session.submit_answer("答")
+    layer2_payload = next(
+        p for p in transport.requests if "第二层追问" in p["messages"][1]["content"]
+    )
+    assert "认知反差" not in layer2_payload["messages"][1]["content"]
+
+
 def test_out_of_order_calls_raise() -> None:
     session, _ = make_session(text_reply("Q1"))
     with pytest.raises(SessionError):

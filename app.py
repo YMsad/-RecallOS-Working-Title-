@@ -81,21 +81,45 @@ def render_home() -> None:
         level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
         interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
 
+    # V0.2.0 — 概念预热（零基础模式）：开始前给 1-2 句最简单的大白话解释
+    if mode == "beginner" and title.strip():
+        if st.button("💡 先给我一句话预热", key="warmup_btn"):
+            try:
+                probe = LearningSession(
+                    title, source, mode="beginner",
+                    level=level_map.get(level_label, "zero"),
+                    interest=interest_map.get(interest_label, "simple"),
+                )
+                with st.spinner("AI 正在思考…"):
+                    st.session_state.warmup_text = probe.warmup()
+                st.rerun()
+            except DeepSeekAuthError:
+                st.error("Key 无效，请重新输入")
+            except DeepSeekError as exc:
+                st.error(f"AI 调用失败：{exc}")
+        if st.session_state.get("warmup_text"):
+            st.info(f"💡 {st.session_state['warmup_text']}")
+
     if st.button("开始", type="primary", use_container_width=True):
         if not title.strip():
             st.info("试试粘贴一段课本内容")
         else:
             try:
-                session = LearningSession(
-                    title,
-                    source,
-                    mode=mode,
-                    level=level_map.get(level_label, "zero"),
-                    interest=interest_map.get(interest_label, "simple"),
-                )
-                question = session.start()
+                with st.spinner("AI 正在思考…"):
+                    session = LearningSession(
+                        title,
+                        source,
+                        mode=mode,
+                        level=level_map.get(level_label, "zero"),
+                        interest=interest_map.get(interest_label, "simple"),
+                    )
+                    question = session.start()
                 st.session_state.session = session
-                st.session_state.messages = [{"role": "assistant", "text": question}]
+                messages = []
+                if mode == "beginner" and st.session_state.get("warmup_text"):
+                    messages.append({"role": "assistant", "text": f"💡 {st.session_state['warmup_text']}"})
+                messages.append({"role": "assistant", "text": question})
+                st.session_state.messages = messages
                 st.session_state.step = "learning"
                 st.rerun()
             except DeepSeekAuthError:
@@ -128,7 +152,8 @@ def render_learning() -> None:
     # V0.2.0 — 「我不懂」解释模式
     if st.button("😵 我不懂，请用大白话解释一下"):
         try:
-            explanation = session.explain()
+            with st.spinner("AI 正在思考…"):
+                explanation = session.explain()
             st.session_state.messages.append(
                 {"role": "assistant", "text": f"💡 我换个说法：\n\n{explanation}"})
             nxt = session.next_question()
@@ -144,7 +169,8 @@ def render_learning() -> None:
     if answer:
         st.session_state.messages.append({"role": "user", "text": answer})
         try:
-            result = session.submit_answer(answer)
+            with st.spinner("AI 正在思考…"):
+                result = session.submit_answer(answer)
             if result["correct"]:
                 reply = f"✓ {result['feedback']}"
             else:
@@ -179,7 +205,8 @@ def render_connections() -> None:
     st.markdown("## 🔗 发现一些知识连接")
     try:
         if not session.recommended_connections:
-            session.get_connections()
+            with st.spinner("AI 正在思考…"):
+                session.get_connections()
     except DeepSeekAuthError:
         st.error("Key 无效，请重新输入")
         return
@@ -216,7 +243,8 @@ def render_summary() -> None:
         own = st.text_input("我终于搞懂了……（用你自己的话，可留空）")
         if st.button("生成总结", type="primary", use_container_width=True):
             had_summary = get_today_summary() is not None
-            summary = session.finish(user_definition=own or "")
+            with st.spinner("AI 正在思考…"):
+                summary = session.finish(user_definition=own or "")
             if not had_summary:
                 streak = int(get_setting("streak", "0")) + 1
                 set_setting("streak", str(streak))

@@ -49,6 +49,8 @@ class FakeClient:
             )
         if "我不懂" in user:
             return "大白话：机会成本就是你放弃的那个次优选择"
+        if "预热" in user:
+            return "用一句话说，机会成本就是你为了得到A而放弃的B。"
         if "降维" in user:
             return "简化后的问题"
         if "换个角度" in user:

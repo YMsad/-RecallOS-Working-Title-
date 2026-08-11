@@ -66,6 +66,34 @@ _MODE_GUIDE = {
     ),
 }
 
+_COGNITIVE_CONTRAST_GUIDE = (
+    "\n\n认知反差：这道题可以从「大部分人第一次会误解成……」的角度切入，"
+    "先点出一个常见的想当然，再引导学习者看清真正应该如何理解；"
+    "只在自然、不刻意的时候使用，仍然只输出一个问题。"
+)
+
+
+def warmup_prompt(
+    *,
+    title: str,
+    source_text: str,
+) -> str:
+    """Build the concept warm-up: 1-2 plain-language sentences before starting
+    (zero-basis / beginner mode only). Returns plain text.
+    """
+    return f"""学习者是零基础，第一次接触这个概念。请用最生活化的大白话，
+先给他 1-2 句「预热」，让他对概念有一个最朴素的第一印象，再进入正式提问。
+
+当前学习的概念：{title}
+来源原文片段：
+{source_text}
+
+要求：
+- 用一句「用一句话说，{title} 就是……」，先把概念点破，别怕简单
+- 紧跟 1-2 句口语化的展开，像朋友随口解释一样
+- 不要出题、不要提问、不要输出 JSON，只要这一段预热话"""
+
+
 
 def opening_question_prompt(
     *,
@@ -115,6 +143,7 @@ def question_prompt(
     qa_history: str = "",
     related_concepts: list[str] | None = None,
     mode: str = "beginner",
+    cognitive_contrast: bool = False,
 ) -> str:
     """Build the user prompt for one layer of questioning. Returns plain text."""
     if layer not in _LAYER_GUIDES:
@@ -133,6 +162,8 @@ def question_prompt(
     if qa_history:
         parts.append(f"学习者此前的回答历史：\n{qa_history}")
     parts.append(f"【{_LAYER_NAMES[layer]}层追问】{guide}")
+    if cognitive_contrast:
+        parts.append(_COGNITIVE_CONTRAST_GUIDE.strip())
     parts.append(_MODE_GUIDE.get(mode, _MODE_GUIDE["beginner"]).strip())
     return "\n\n".join(parts)
 
@@ -405,6 +436,7 @@ __all__ = [
     "simplify_question_prompt",
     "angle_shift_prompt",
     "explain_prompt",
+    "warmup_prompt",
     "build_messages",
     "parse_json_response",
     "validate_response",

@@ -49,6 +49,7 @@ from core.prompts import (
     summary_prompt,
     validate_response,
     validate_response_list,
+    warmup_prompt,
 )
 from core.session import LearningSession, SessionError
 
@@ -87,6 +88,7 @@ __all__ = [
     "simplify_question_prompt",
     "angle_shift_prompt",
     "explain_prompt",
+    "warmup_prompt",
     "build_messages",
     "parse_json_response",
     "validate_response",

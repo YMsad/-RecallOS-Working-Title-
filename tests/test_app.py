@@ -49,6 +49,8 @@ class FakeClient:
             )
         if "我不懂" in user:
             return "大白话：机会成本就是你放弃的那个次优选择"
+        if "预热" in user:
+            return "用一句话说，机会成本就是你为了得到A而放弃的B。"
         if "降维" in user:
             return "简化后的问题"
         if "换个角度" in user:
@@ -213,3 +215,33 @@ def test_app_explain_button(monkeypatch, configured_app) -> None:
     at = click_by_label(at, "我不懂")
     assert not at.exception
     assert "我换个说法" in markdown_text(at)
+
+
+def test_app_warmup_button_shows_prewarm_text(monkeypatch, configured_app) -> None:
+    fake = FakeClient(make_questions(4))
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = at.run()
+    at = click_by_label(at, "预热")
+    assert not at.exception
+    assert any(
+        "用一句话说，机会成本就是你为了得到A而放弃的B。" in m.value
+        for m in at.info
+    )
+
+
+def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app) -> None:
+    fake = FakeClient(make_questions(4))
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = at.run()
+    at = click_by_label(at, "预热")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert current_step(at) == "learning"
+    assert "用一句话说" in markdown_text(at)
+    assert "开场问题" in markdown_text(at)
