@@ -347,25 +347,6 @@ def render_api_key_setup() -> None:
         st.rerun()
 
 
-@st.dialog("重新配置 API Key")
-def render_reconfigure_dialog() -> None:
-    """Dialog to replace the current API key. Saves, resets cache, returns home."""
-    st.caption("新 Key 会覆盖本机 ~/.recallos/config.json 中保存的旧 Key。")
-    new_key = st.text_input("新的 DeepSeek API Key", type="password",
-                            placeholder="sk-...", key="reconfigure_key_input")
-    if st.button("保存并重新加载", type="primary"):
-        key = (new_key or "").strip()
-        if not key:
-            st.error("Key 不能为空")
-            return
-        save_api_key_to_config(key)
-        reset_settings_cache()
-        st.session_state.pop("session", None)
-        st.session_state.pop("messages", None)
-        st.session_state.step = "home"
-        st.rerun()
-
-
 def render_reconfigure() -> None:
     """Dedicated page to replace the current API key. Saves, resets cache, returns home."""
     st.markdown("<h1 style='text-align:center;color:#6B6B6B;font-size:20px'>📚 RecallOS</h1>",
