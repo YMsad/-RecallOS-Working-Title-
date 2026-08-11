@@ -302,9 +302,30 @@ class LearningSession:
             related_concepts=related,
             mode=self.mode,
             cognitive_contrast=self.mode == "beginner" and layer in (2, 3),
+            model=self._route_model(layer),
         )
         reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         return reply.strip()
+
+    def _route_model(self, layer: int) -> str | None:
+        """V0.2.1 — 思维模型自动路由：根据用户表现自动选择追问模型，不加选择负担。
+
+        - 第 4 层（连接）→ 类比：用「这就像你之前学的 X…」引导连接
+        - 零基础模式 → 场景化：让抽象概念落地到生活场景
+        - 有基础模式：
+          - 已连续答对 → 第一性原理：往更深处拆
+          - 出现连错 / 换过角度 → 黄金圈：回到 Why，重新夯实根本
+        - 其余情况不注入特定模型（默认苏格拉底四层追问）
+        """
+        if layer == 4:
+            return "analogy"
+        if self.mode == "beginner":
+            return "scenario"
+        if self.mode == "advanced":
+            if self.consecutive_failures == 0 and not self.marked_uncertain:
+                return "first_principles"
+            return "golden_circle"
+        return None
 
     def _simplify_question(self, question: str) -> str:
         prompt = simplify_question_prompt(

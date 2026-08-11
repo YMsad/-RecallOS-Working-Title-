@@ -72,6 +72,37 @@ _COGNITIVE_CONTRAST_GUIDE = (
     "只在自然、不刻意的时候使用，仍然只输出一个问题。"
 )
 
+# V0.2.1 — 思维模型注入（黄金圈 / 场景化 / 类比 / 第一性原理）
+_MODEL_NAMES = {
+    "golden_circle": "黄金圈法则",
+    "scenario": "场景化提问",
+    "analogy": "结构性类比",
+    "first_principles": "第一性原理",
+}
+
+_MODEL_GUIDES: dict[str, str] = {
+    "golden_circle": (
+        "\n\n思维模型【黄金圈法则】：按 Why（它为什么存在、解决什么根本问题）"
+        "→ How（它是怎么运作的）→ What（它到底是什么）的顺序引导；"
+        "当前这一问只推进其中一环，问题要具体，仍然只输出一个问题。"
+    ),
+    "scenario": (
+        "\n\n思维模型【场景化提问】：把问题放进一个具体的生活场景里（比如买奶茶、"
+        "找工作、经营小店），用「如果……你会怎么做？」来引导，让抽象的概念落地；"
+        "仍然只输出一个问题。"
+    ),
+    "analogy": (
+        "\n\n思维模型【结构性类比】：先用「这就像……」引导学习者把当前概念"
+        "比作一个熟悉的东西，再追问两者的相似与关键差异，借此建立类比；"
+        "注意：让学习者自己说出类比，不要直接给出类比，仍然只输出一个问题。"
+    ),
+    "first_principles": (
+        "\n\n思维模型【第一性原理】：引导学习者把概念拆到不可再拆的基本事实，"
+        "用「它最底层的原理/基本事实是什么？」，撇开所有既有结论从零推导；"
+        "仍然只输出一个问题。"
+    ),
+}
+
 
 def warmup_prompt(
     *,
@@ -144,10 +175,13 @@ def question_prompt(
     related_concepts: list[str] | None = None,
     mode: str = "beginner",
     cognitive_contrast: bool = False,
+    model: str | None = None,
 ) -> str:
     """Build the user prompt for one layer of questioning. Returns plain text."""
     if layer not in _LAYER_GUIDES:
         raise ValueError(f"layer must be one of {sorted(_LAYER_GUIDES)}, got {layer}")
+    if model is not None and model not in _MODEL_GUIDES:
+        raise ValueError(f"model must be one of {sorted(_MODEL_GUIDES)}, got {model}")
 
     if layer == 4:
         related = "、".join(related_concepts) if related_concepts else "你之前学过的其他概念"
@@ -164,6 +198,8 @@ def question_prompt(
     parts.append(f"【{_LAYER_NAMES[layer]}层追问】{guide}")
     if cognitive_contrast:
         parts.append(_COGNITIVE_CONTRAST_GUIDE.strip())
+    if model is not None:
+        parts.append(_MODEL_GUIDES[model].strip())
     parts.append(_MODE_GUIDE.get(mode, _MODE_GUIDE["beginner"]).strip())
     return "\n\n".join(parts)
 

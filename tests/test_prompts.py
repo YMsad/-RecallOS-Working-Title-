@@ -70,6 +70,26 @@ def test_question_prompt_is_plain_text_not_json() -> None:
     assert '{"' not in prompt
 
 
+@pytest.mark.parametrize(
+    ("model", "marker"),
+    [
+        ("golden_circle", "黄金圈法则"),
+        ("scenario", "场景化提问"),
+        ("analogy", "结构性类比"),
+        ("first_principles", "第一性原理"),
+    ],
+)
+def test_question_prompt_with_thinking_model(model: str, marker: str) -> None:
+    prompt = question_prompt(1, title="X", source_text="Y", model=model)
+    assert marker in prompt
+    assert "思维模型" in prompt
+
+
+def test_question_prompt_invalid_model_rejected() -> None:
+    with pytest.raises(ValueError):
+        question_prompt(1, title="X", source_text="Y", model="nope")
+
+
 def test_question_prompt_with_cognitive_contrast() -> None:
     prompt = question_prompt(
         2, title="机会成本", source_text="Y", cognitive_contrast=True
