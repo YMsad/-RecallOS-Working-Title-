@@ -22,6 +22,8 @@ def write_config(monkeypatch, tmp_path, key):
 
 
 def test_get_api_key_missing_config(tmp_path, monkeypatch) -> None:
+    empty = tmp_path / "empty" / "config.json"
+    monkeypatch.setattr("core.config.CONFIG_FILE", empty)
     assert get_api_key_from_config() == ""
 
 

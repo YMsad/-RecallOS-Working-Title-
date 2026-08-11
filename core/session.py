@@ -24,14 +24,19 @@ from core.prompts import (
     CheckAnswerResult,
     ConnectionSuggestion,
     SummaryResult,
+    angle_shift_prompt,
     build_messages,
     check_answer_prompt,
     connections_prompt,
+    explain_prompt,
+    opening_question_prompt,
     question_prompt,
     reference_answer_prompt,
+    simplify_question_prompt,
     summary_prompt,
     validate_response,
     validate_response_list,
+    warmup_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,17 +61,26 @@ class LearningSession:
         *,
         client: DeepSeekClient | None = None,
         max_consecutive_failures: int = 3,
+        mode: str = "beginner",
+        level: str = "zero",
+        interest: str = "simple",
     ) -> None:
         self.title = title.strip()
         self.source_text = source_text
         self.client = client or DeepSeekClient()
         self.max_consecutive_failures = max_consecutive_failures
+        self.mode = mode if mode in ("beginner", "advanced") else "beginner"
+        self.level = level if level in ("zero", "some", "familiar") else "zero"
+        self.interest = (
+            interest if interest in ("simple", "deep", "example") else "simple"
+        )
 
         # State
         self.concept_id: int | None = None
         self.layer: int = 0
         self.phase: str = "learning"
         self.consecutive_failures: int = 0
+        self.explain_used: bool = False
         self.marked_uncertain: bool = False
         self.qa_history: list[dict[str, Any]] = []
         self._current_question: str | None = None
@@ -80,22 +94,32 @@ class LearningSession:
         self.concept_id = save_concept(self.title, self.source_text)
         self.phase = "learning"
         self.layer = 1
-        self._current_question = self._generate_question(layer=1)
+        self._current_question = self._generate_opening_question()
         logger.info("Session started for concept %s (id=%s)", self.title, self.concept_id)
         return self._current_question
+
+    def warmup(self) -> str:
+        """Give a 1-2 sentence plain-language intro (zero-basis pre-warm), or '' if
+        already known. Does not require the session to be started."""
+        if self.mode != "beginner":
+            return ""
+        prompt = warmup_prompt(title=self.title, source_text=self.source_text)
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        return reply.strip()
 
     def next_question(self) -> str | None:
         """Return the current question, or None once learning has finished."""
         return self._current_question
 
     def submit_answer(self, answer: str) -> dict[str, Any]:
-        """Judge the answer; advance the layer on success, offer hints on failure."""
+        """Judge the answer; advance the layer on success, escalate support on failure."""
         cid = self._require_started()
         if self.phase != "learning" or self._current_question is None:
             raise SessionError("submit_answer can only be called during learning")
 
         question = self._current_question
-        judgement = self._judge_answer(answer)
+        is_last_attempt = self.consecutive_failures >= self.max_consecutive_failures - 1
+        judgement = self._judge_answer(answer, is_last_attempt=is_last_attempt)
         self.qa_history.append(
             {
                 "question": question,
@@ -120,6 +144,9 @@ class LearningSession:
             "reference": None,
             "mastery": None,
             "is_done": False,
+            "simplified": False,
+            "angle_shift": False,
+            "explain_used": self.explain_used,
         }
 
         if judgement["correct"]:
@@ -135,11 +162,48 @@ class LearningSession:
                 result["reference"] = reference
                 result["mastery"] = MASTERY_UNCLEAR
                 self._advance_layer()
+            elif self.consecutive_failures == 1:
+                # 降维：第一次答错后换更简单、更具体的问题
+                self._current_question = self._simplify_question(question)
+                result["simplified"] = True
+            elif self.consecutive_failures == 2:
+                # 换角度：第二次答错后，先问要不要换个角度
+                self._current_question = self._angle_shift(question)
+                result["angle_shift"] = True
 
         if self.layer > MAX_LAYER:
             self.phase = "connections"
         result["is_done"] = self.phase != "learning"
         return result
+
+    def ask_for_angle_switch(self) -> str:
+        """Explicitly offer '换个角度理解？' without waiting for another wrong answer.
+
+        Returns the angle-shifted question.
+        """
+        cid = self._require_started()
+        if self.phase != "learning" or self._current_question is None:
+            raise SessionError("ask_for_angle_switch can only be called during learning")
+        self._current_question = self._angle_shift(self._current_question)
+        self.consecutive_failures = 0
+        logger.info("Angle switch offered for concept %s (id=%s)", self.title, cid)
+        return self._current_question
+
+    def explain(self) -> str:
+        """Explain the current question in plain language. Returns the explanation."""
+        cid = self._require_started()
+        if self.phase != "learning" or self._current_question is None:
+            raise SessionError("explain can only be called during learning")
+        prompt = explain_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            question=self._current_question,
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        self.explain_used = True
+        self.consecutive_failures = 0
+        logger.info("Explanation given for concept %s (id=%s)", self.title, cid)
+        return reply.strip()
 
     def get_connections(self) -> list[ConnectionSuggestion]:
         """Recommend and persist knowledge connections. Called after learning."""
@@ -199,6 +263,17 @@ class LearningSession:
             raise SessionError("session has not been started; call start() first")
         return self.concept_id
 
+    def _generate_opening_question(self) -> str:
+        prompt = opening_question_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            level=self.level,
+            interest=self.interest,
+            mode=self.mode,
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
+        return reply.strip()
+
     def _generate_question(self, layer: int) -> str:
         related = None
         if layer == 4:
@@ -213,16 +288,41 @@ class LearningSession:
             source_text=self.source_text,
             qa_history=self._format_history(),
             related_concepts=related,
+            mode=self.mode,
+            cognitive_contrast=self.mode == "beginner" and layer in (2, 3),
         )
         reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         return reply.strip()
 
-    def _judge_answer(self, answer: str) -> dict[str, str | bool | None]:
+    def _simplify_question(self, question: str) -> str:
+        prompt = simplify_question_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            question=question,
+            mode=self.mode,
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
+        return reply.strip()
+
+    def _angle_shift(self, question: str) -> str:
+        prompt = angle_shift_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            question=question,
+            mode=self.mode,
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
+        return reply.strip()
+
+    def _judge_answer(
+        self, answer: str, *, is_last_attempt: bool = False
+    ) -> dict[str, str | bool | None]:
         prompt = check_answer_prompt(
             title=self.title,
             source_text=self.source_text,
             question=self._current_question or "",
             answer=answer,
+            is_last_attempt=is_last_attempt,
         )
         reply = self.client.chat(build_messages(prompt), temperature=JUDGE_TEMPERATURE)
         result: CheckAnswerResult = validate_response(reply, CheckAnswerResult)

@@ -18,6 +18,7 @@ from core import (
     summary_prompt,
     validate_response,
     validate_response_list,
+    warmup_prompt,
 )
 
 
@@ -66,6 +67,24 @@ def test_question_prompt_invalid_layer_rejected() -> None:
 
 def test_question_prompt_is_plain_text_not_json() -> None:
     prompt = question_prompt(1, title="X", source_text="Y")
+    assert '{"' not in prompt
+
+
+def test_question_prompt_with_cognitive_contrast() -> None:
+    prompt = question_prompt(
+        2, title="机会成本", source_text="Y", cognitive_contrast=True
+    )
+    assert "认知反差" in prompt
+    assert "误解" in prompt
+    plain = question_prompt(2, title="机会成本", source_text="Y")
+    assert "认知反差" not in plain
+
+
+def test_warmup_prompt_is_plain_text_with_title() -> None:
+    prompt = warmup_prompt(title="机会成本", source_text="原文……")
+    assert "机会成本" in prompt
+    assert "预热" in prompt
+    assert "用一句话说" in prompt
     assert '{"' not in prompt
 
 
