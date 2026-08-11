@@ -51,7 +51,7 @@ from core.prompts import (
     validate_response_list,
     warmup_prompt,
 )
-from core.session import LearningSession, SessionError
+from core.session import LearningSession, SessionError, warmup_concept
 
 __all__ = [
     "DeepSeekClient",
@@ -98,6 +98,7 @@ __all__ = [
     "ConnectionSuggestion",
     "LearningSession",
     "SessionError",
+    "warmup_concept",
 ]
 
 

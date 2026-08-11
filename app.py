@@ -16,6 +16,7 @@ from core import (
     init_db,
     reset_settings_cache,
     save_api_key_to_config,
+    warmup_concept,
 )
 from core.database import (
     get_all_concepts,
@@ -82,23 +83,19 @@ def render_home() -> None:
         interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
 
     # V0.2.0 — 概念预热（零基础模式）：开始前给 1-2 句最简单的大白话解释
-    if mode == "beginner" and title.strip():
-        if st.button("💡 先给我一句话预热", key="warmup_btn"):
-            try:
-                probe = LearningSession(
-                    title, source, mode="beginner",
-                    level=level_map.get(level_label, "zero"),
-                    interest=interest_map.get(interest_label, "simple"),
-                )
-                with st.spinner("AI 正在思考…"):
-                    st.session_state.warmup_text = probe.warmup()
-                st.rerun()
-            except DeepSeekAuthError:
-                st.error("Key 无效，请重新输入")
-            except DeepSeekError as exc:
-                st.error(f"AI 调用失败：{exc}")
+    if mode == "beginner":
         if st.session_state.get("warmup_text"):
             st.info(f"💡 {st.session_state['warmup_text']}")
+        elif title.strip():
+            if st.button("💡 先给我一句话预热", key="warmup_btn"):
+                try:
+                    with st.spinner("AI 正在生成预热解释…"):
+                        st.session_state.warmup_text = warmup_concept(title, source)
+                    st.rerun()
+                except DeepSeekAuthError:
+                    st.error("Key 无效，请重新输入")
+                except DeepSeekError as exc:
+                    st.error(f"AI 调用失败：{exc}")
 
     if st.button("开始", type="primary", use_container_width=True):
         if not title.strip():
