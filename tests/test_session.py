@@ -137,6 +137,7 @@ def test_wrong_answer_returns_hint_and_stays() -> None:
     session, _ = make_session(
         text_reply("Q1"),
         judge(False, "再想想", "想一想你放弃了什么"),
+        text_reply("更简单的问题：你买奶茶时放弃了什么？"),
     )
     session.start()
     result = session.submit_answer("错误回答")
@@ -144,27 +145,39 @@ def test_wrong_answer_returns_hint_and_stays() -> None:
     assert result["hint"] == "想一想你放弃了什么"
     assert result["reference"] is None
     assert result["is_done"] is False
+    assert result["simplified"] is True
     assert session.layer == 1
-    assert session.next_question() == "Q1"
+    # 降维追问：不再是原问题，而是更简单的问题
+    assert session.next_question() == "更简单的问题：你买奶茶时放弃了什么？"
     history = database.get_qa_history(session.concept_id)
     assert len(history) == 1
     assert history[0]["hint_used"] == 1
     assert history[0]["is_correct"] == 0
 
 
-def test_three_failures_give_reference_and_mark_uncertain() -> None:
+def test_three_failures_escalate_simplify_angle_reference() -> None:
     session, _ = make_session(
         text_reply("Q1"),
         judge(False, "再想想", "h1"),
+        text_reply("简化后的问题"),
         judge(False, "再想想", "h2"),
+        text_reply("换个角度的问题"),
         judge(False, "再想想", "h3"),
         text_reply("参考解释：机会成本是你放弃的次优价值"),
         text_reply("Q2"),
     )
     session.start()
     r1 = session.submit_answer("A1")
+    assert r1["simplified"] is True
+    assert r1["angle_shift"] is False
+    assert r1["reference"] is None
+    assert session.next_question() == "简化后的问题"
+
     r2 = session.submit_answer("A2")
-    assert r1["reference"] is None and r2["reference"] is None
+    assert r2["angle_shift"] is True
+    assert r2["reference"] is None
+    assert session.next_question() == "换个角度的问题"
+
     r3 = session.submit_answer("A3")
     assert r3["reference"] == "参考解释：机会成本是你放弃的次优价值"
     assert r3["mastery"] == MASTERY_UNCLEAR
@@ -178,7 +191,9 @@ def test_uncertain_flow_finishes_with_mastery_uncertain() -> None:
     session, _ = make_session(
         text_reply("Q1"),
         judge(False, "再想想", "h"),
+        text_reply("简化"),
         judge(False, "再想想", "h"),
+        text_reply("换角度"),
         judge(False, "再想想", "h"),
         text_reply("参考解释"),
         text_reply("Q2"),
@@ -201,6 +216,50 @@ def test_uncertain_flow_finishes_with_mastery_uncertain() -> None:
     session.get_connections()
     session.finish(user_definition="有点明白了")
     assert database.get_concept(session.concept_id)["mastery"] == MASTERY_UNCLEAR
+
+
+def test_explain_mode_returns_plain_text_and_resets_failures() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        judge(False, "再想想", "h"),
+        text_reply("简化"),
+        judge(False, "再想想", "h"),
+        text_reply("换个角度的问题"),
+        text_reply("大白话解释：机会成本就是你放弃的那个次优选择"),
+    )
+    session.start()
+    session.submit_answer("错误")
+    session.submit_answer("再错")
+    assert session.consecutive_failures == 2
+    explanation = session.explain()
+    assert explanation == "大白话解释：机会成本就是你放弃的那个次优选择"
+    assert session.explain_used is True
+    assert session.consecutive_failures == 0
+    explain_payload = next(
+        p for p in transport.requests if "我不懂" in p["messages"][1]["content"]
+    )
+    assert "大白话" in explain_payload["messages"][1]["content"]
+
+
+def test_ask_for_angle_switch_explicit() -> None:
+    session, _ = make_session(
+        text_reply("Q1"),
+        text_reply("换个角度的问题"),
+    )
+    session.start()
+    question = session.ask_for_angle_switch()
+    assert question == "换个角度的问题"
+    assert session.consecutive_failures == 0
+    assert session.next_question() == "换个角度的问题"
+
+
+def test_opening_question_is_tailored_to_level_and_interest() -> None:
+    session, transport = make_session(text_reply("开场问题"))
+    session.start()
+    opening_payload = transport.requests[0]["messages"][1]["content"]
+    assert "开场第一个问题" in opening_payload
+    assert "零基础" in opening_payload or "基础" in opening_payload
+    assert "兴趣" in opening_payload
 
 
 def test_out_of_order_calls_raise() -> None:

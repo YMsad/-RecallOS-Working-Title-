@@ -11,17 +11,29 @@ collects widget states. The app itself is unaffected in a real browser.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from streamlit.runtime.scriptrunner import ScriptRunnerEvent
 
 
 @pytest.fixture(autouse=True)
 def isolated_user_config(tmp_path, monkeypatch):
-    """Point ~/.recallos/config.json at a per-test temp file."""
+    """Point ~/.recallos/config.json at a per-test temp file and seed it with a
+    valid test key, so the app/CLI boot to their normal flows even when the real
+    .env has a blanked key (as happens after manual testing). Tests that exercise
+    the key-setup path re-point CONFIG_FILE to an empty temp file themselves.
+    """
     from core import config
 
-    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / ".recallos")
-    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / ".recallos" / "config.json")
+    config_dir = tmp_path / ".recallos"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "config.json"
+    config_file.write_text(
+        json.dumps({"DEEPSEEK_API_KEY": "test-key"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
     config.reset_settings_cache()
     yield
 

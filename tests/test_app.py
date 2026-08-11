@@ -47,6 +47,14 @@ class FakeClient:
                 {"breakthrough": "我终于搞懂了机会成本", "tomorrow_hook": "明天再想"},
                 ensure_ascii=False,
             )
+        if "我不懂" in user:
+            return "大白话：机会成本就是你放弃的那个次优选择"
+        if "降维" in user:
+            return "简化后的问题"
+        if "换个角度" in user:
+            return "换个角度的问题"
+        if "开场第一个问题" in user:
+            return f"开场问题{self.i + 1}"
         if "层追问" in user:
             return f"问题{self.i + 1}"
         raise AssertionError(f"unexpected prompt: {user[:40]}")
@@ -55,6 +63,18 @@ class FakeClient:
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
     database.configure(tmp_path / "test.db")
+    yield
+
+
+@pytest.fixture
+def configured_app(monkeypatch, tmp_path):
+    """Give the app a valid API key so it boots to home (not the setup page)."""
+    from core.config import Settings
+
+    monkeypatch.setattr("core.config.Settings", lambda: Settings(deepseek_api_key="test-key", _env_file=None))
+    from core import config
+
+    config.reset_settings_cache()
     yield
 
 
@@ -78,7 +98,7 @@ def markdown_text(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown)
 
 
-def test_app_boots_to_home() -> None:
+def test_app_boots_to_home(configured_app) -> None:
     at = AppTest.from_file(APP, default_timeout=15).run()
     assert not at.exception
     assert current_step(at) == "home"
@@ -119,7 +139,7 @@ def test_app_save_key_returns_to_home(monkeypatch, tmp_path) -> None:
     assert config.get_api_key_from_config() == "sk-app-saved"
 
 
-def test_app_full_flow(monkeypatch) -> None:
+def test_app_full_flow(monkeypatch, configured_app) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=30).run()
 
@@ -155,7 +175,7 @@ def test_app_full_flow(monkeypatch) -> None:
     assert "明天再想" in markdown_text(at)
 
 
-def test_app_history_view(monkeypatch) -> None:
+def test_app_history_view(monkeypatch, configured_app) -> None:
     cid = database.save_concept("机会成本", "原文")
     database.update_concept(cid, mastery="搞懂了")
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -163,3 +183,33 @@ def test_app_history_view(monkeypatch) -> None:
     assert not at.exception
     assert current_step(at) == "history"
     assert "机会成本" in markdown_text(at)
+
+
+def test_app_mode_toggle_on_home(configured_app) -> None:
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert len(at.toggle) == 1
+    assert "有基础" in at.toggle[0].label
+
+
+def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app) -> None:
+    fake = FakeClient(make_questions(4))
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert current_step(at) == "learning"
+    assert "开场问题" in markdown_text(at)
+
+
+def test_app_explain_button(monkeypatch, configured_app) -> None:
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = click_by_label(at, "开始")
+    at = click_by_label(at, "我不懂")
+    assert not at.exception
+    assert "我换个说法" in markdown_text(at)

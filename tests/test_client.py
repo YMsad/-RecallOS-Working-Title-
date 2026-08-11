@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -45,7 +46,8 @@ def error_body(status: int, message: str = "boom") -> httpx.Response:
     return httpx.Response(status, json={"error": {"message": message}})
 
 
-def test_missing_api_key_raises() -> None:
+def test_missing_api_key_raises(monkeypatch) -> None:
+    monkeypatch.setattr("core.config.CONFIG_FILE", Path("/nonexistent/empty-config.json"))
     with pytest.raises(DeepSeekAuthError):
         DeepSeekClient(settings=Settings(deepseek_api_key=""))
 
@@ -205,10 +207,10 @@ def test_unexpected_response_shape_raises() -> None:
 
 
 def test_real_connectivity() -> None:
-    """Ping DeepSeek for real. Skipped unless DEEPSEEK_API_KEY is configured."""
+    """Ping DeepSeek for real. Skipped unless a real DEEPSEEK_API_KEY is configured."""
     settings = get_settings()
-    if not settings.deepseek_api_key:
-        pytest.skip("DEEPSEEK_API_KEY not set")
+    if not settings.deepseek_api_key or settings.deepseek_api_key == "test-key":
+        pytest.skip("real DEEPSEEK_API_KEY not set")
     with DeepSeekClient(settings=settings) as client:
         reply = client.chat(
             [{"role": "user", "content": "请只回复两个字：连通"}], max_tokens=10

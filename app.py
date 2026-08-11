@@ -66,12 +66,33 @@ def render_home() -> None:
 
     title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念")
     source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…")
+
+    # V0.2.0 — 零基础/有基础模式切换 + 动态开场（2 个快速问题）
+    mode = "beginner"
+    if st.toggle("有基础（对这个概念有一定了解）", value=False, key="mode_toggle"):
+        mode = "advanced"
+    with st.expander("告诉我一点你的情况，我会调整开场（可选）"):
+        level_map = {"完全没接触过": "zero", "听说过一点": "some", "比较熟悉": "familiar"}
+        interest_map = {
+            "先弄懂基本意思": "simple",
+            "想深入理解": "deep",
+            "想结合生活例子": "example",
+        }
+        level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
+        interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
+
     if st.button("开始", type="primary", use_container_width=True):
         if not title.strip():
             st.info("试试粘贴一段课本内容")
         else:
             try:
-                session = LearningSession(title, source)
+                session = LearningSession(
+                    title,
+                    source,
+                    mode=mode,
+                    level=level_map.get(level_label, "zero"),
+                    interest=interest_map.get(interest_label, "simple"),
+                )
                 question = session.start()
                 st.session_state.session = session
                 st.session_state.messages = [{"role": "assistant", "text": question}]
@@ -103,6 +124,23 @@ def render_messages() -> None:
 def render_learning() -> None:
     session = st.session_state.session
     answer = st.chat_input("你的回答…")
+
+    # V0.2.0 — 「我不懂」解释模式
+    if st.button("😵 我不懂，请用大白话解释一下"):
+        try:
+            explanation = session.explain()
+            st.session_state.messages.append(
+                {"role": "assistant", "text": f"💡 我换个说法：\n\n{explanation}"})
+            nxt = session.next_question()
+            if nxt:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"那我们再想想这个问题：\n\n{nxt}"})
+        except DeepSeekAuthError:
+            st.session_state.messages.append(
+                {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+        except (DeepSeekError, SessionError) as exc:
+            st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+
     if answer:
         st.session_state.messages.append({"role": "user", "text": answer})
         try:
@@ -119,7 +157,7 @@ def render_learning() -> None:
 
             if result["is_done"]:
                 st.session_state.step = "connections"
-            elif result["correct"] or result["reference"]:
+            elif result["correct"] or result["reference"] or result["simplified"] or result["angle_shift"]:
                 nxt = session.next_question()
                 if nxt:
                     st.session_state.messages.append({"role": "assistant", "text": nxt})

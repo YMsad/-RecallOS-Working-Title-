@@ -47,6 +47,14 @@ class FakeClient:
                 {"breakthrough": "我终于搞懂了机会成本", "tomorrow_hook": "明天再想"},
                 ensure_ascii=False,
             )
+        if "我不懂" in user:
+            return "大白话：机会成本就是你放弃的那个次优选择"
+        if "降维" in user:
+            return "简化后的问题"
+        if "换个角度" in user:
+            return "换个角度的问题"
+        if "开场第一个问题" in user:
+            return f"开场问题：{self.questions[self.i]['question']}"
         if "层追问" in user:
             return f"问题：{self.questions[self.i]['question']}"
         raise AssertionError(f"unexpected prompt: {user[:40]}")
