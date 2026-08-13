@@ -20,6 +20,7 @@ from core.database import (
     update_concept,
 )
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
+from core.review import add_to_review_queue
 from core.prompts import (
     CheckAnswerResult,
     ConnectionSuggestion,
@@ -264,6 +265,7 @@ class LearningSession:
             user_definition=user_definition or None,
             mastery=mastery,
         )
+        add_to_review_queue(cid)
         self.phase = "finished"
         logger.info("Session finished for concept %s (mastery=%s)", self.title, mastery)
         return self.summary

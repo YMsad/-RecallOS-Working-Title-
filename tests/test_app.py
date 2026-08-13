@@ -47,6 +47,8 @@ class FakeClient:
                 {"breakthrough": "我终于搞懂了机会成本", "tomorrow_hook": "明天再想"},
                 ensure_ascii=False,
             )
+        if "复习日" in user:
+            return "复习问题：机会成本是什么？"
         if "我不懂" in user:
             return "大白话：机会成本就是你放弃的那个次优选择"
         if "预热" in user:
@@ -269,3 +271,103 @@ def test_app_reconfigure_saves_new_key_and_returns_home(configured_app) -> None:
     assert not at.exception
     assert config.get_api_key_from_config() == "sk-new-key-123"
     assert current_step(at) == "home"
+
+
+# ------------------------------------------------------------------ V0.2.2
+
+
+def _seed_due_concept() -> int:
+    """Create a concept that is due for review today."""
+    from datetime import date
+
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.update_concept(cid, mastery="搞懂了", next_review_date=date.today().isoformat())
+    return cid
+
+
+def test_app_review_entry_shown_on_home(configured_app) -> None:
+    _seed_due_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert any("今日复习" in (b.label or "") for b in at.button)
+
+
+def test_app_review_entry_hidden_when_nothing_due(configured_app) -> None:
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert not any("今日复习" in (b.label or "") for b in at.button)
+
+
+def test_app_review_list_shows_due_concepts(configured_app) -> None:
+    _seed_due_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "今日复习")
+    assert not at.exception
+    assert current_step(at) == "review_list"
+    assert "机会成本" in markdown_text(at)
+    assert any("开始复习" in (b.label or "") for b in at.button)
+
+
+def test_app_review_mode_asks_tomorrow_hook_and_passes(monkeypatch, configured_app) -> None:
+    from core import review as review_module
+
+    cid = _seed_due_concept()
+    database.save_daily_summary(cid, "我终于搞懂了", "明天再想")
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "对"}] * 3)
+    monkeypatch.setattr(review_module, "DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "今日复习")
+    at = click_by_label(at, "开始复习")
+    assert not at.exception
+    assert current_step(at) == "review"
+    assert "明天再想" in markdown_text(at)
+
+    at = at.chat_input[0].set_value("答").run()
+    assert not at.exception
+    assert "对" in markdown_text(at)
+    assert any("复习通过" in (s.value or "") for s in at.success)
+
+
+def test_app_review_mode_three_failures_needs_relearn(monkeypatch, configured_app) -> None:
+    from core import review as review_module
+
+    cid = _seed_due_concept()
+    database.save_daily_summary(cid, "我终于搞懂了", "明天再想")
+    fake = FakeClient([{"question": "Q", "correct": False, "feedback": "再想想"}] * 3)
+    monkeypatch.setattr(review_module, "DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "今日复习")
+    at = click_by_label(at, "开始复习")
+    assert not at.exception
+    for _ in range(3):
+        at = at.chat_input[0].set_value("错").run()
+    assert not at.exception
+    assert "重新学" in markdown_text(at)
+    assert any("重新学" in (w.value or "") for w in at.warning)
+    assert database.get_concept(cid)["mastery"] == "学习中"
+
+
+def test_app_connection_bidirectional_jump(monkeypatch, configured_app) -> None:
+    cid_a = database.save_concept("机会成本", "原文A")
+    cid_b = database.save_concept("沉没成本", "原文B")
+    database.save_connection(cid_a, cid_b, "都关于选择")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert any("去往" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "去往")
+    assert not at.exception
+    assert current_step(at) == "concept_detail"
+    assert "沉没成本" in markdown_text(at)
+
+
+def test_app_connection_long_text_preserved(monkeypatch, configured_app) -> None:
+    cid_a = database.save_concept("机会成本", "原文A")
+    cid_b = database.save_concept("沉没成本", "原文B")
+    database.save_connection(cid_a, cid_b, "都关于选择")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    # 长关系说明应完整显示，而不是被截断成单行
+    assert "都关于选择" in markdown_text(at)

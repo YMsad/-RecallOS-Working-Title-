@@ -11,7 +11,9 @@ from core import (
     DeepSeekAuthError,
     DeepSeekError,
     LearningSession,
+    ReviewSession,
     SessionError,
+    get_due_reviews,
     get_settings,
     init_db,
     reset_settings_cache,
@@ -21,6 +23,7 @@ from core import (
 from core.database import (
     get_all_concepts,
     get_all_connections,
+    get_concept,
     get_connections,
     get_daily_summaries_for_concept,
     get_qa_history,
@@ -44,6 +47,10 @@ def reset_to_home() -> None:
     st.session_state.pop("session", None)
     st.session_state.pop("messages", None)
     st.session_state.pop("summary_result", None)
+    st.session_state.pop("review_session", None)
+    st.session_state.pop("review_messages", None)
+    st.session_state.pop("review_finished", None)
+    st.session_state.pop("concept_detail_id", None)
     st.session_state.step = "home"
 
 
@@ -65,8 +72,15 @@ def render_home() -> None:
     st.markdown("<p style='text-align:center;font-size:26px'>今天想弄懂什么？</p>",
                 unsafe_allow_html=True)
 
-    title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念")
-    source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…")
+    # V0.2.2 — 首页顶部复习入口：有到期待复习的概念时显示
+    due_count = len(get_due_reviews())
+    if due_count:
+        if st.button(f"📝 今日复习（{due_count}）", key="review_entry",
+                     type="primary", use_container_width=True):
+            _navigate("review_list")
+
+    title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
+    source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
 
     # V0.2.0 — 零基础/有基础模式切换 + 动态开场（2 个快速问题）
     mode = "beginner"
@@ -146,23 +160,6 @@ def render_learning() -> None:
     session = st.session_state.session
     answer = st.chat_input("你的回答…")
 
-    # V0.2.0 — 「我不懂」解释模式
-    if st.button("😵 我不懂，请用大白话解释一下"):
-        try:
-            with st.spinner("AI 正在思考…"):
-                explanation = session.explain()
-            st.session_state.messages.append(
-                {"role": "assistant", "text": f"💡 我换个说法：\n\n{explanation}"})
-            nxt = session.next_question()
-            if nxt:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"那我们再想想这个问题：\n\n{nxt}"})
-        except DeepSeekAuthError:
-            st.session_state.messages.append(
-                {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-        except (DeepSeekError, SessionError) as exc:
-            st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
-
     if answer:
         st.session_state.messages.append({"role": "user", "text": answer})
         try:
@@ -191,8 +188,114 @@ def render_learning() -> None:
             st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
 
     render_messages()
+
+    # P0 — 「我不懂」按钮紧跟输入框，答不出来时随手可点
+    if st.button("😵 我不懂，请用大白话解释一下", key="explain_btn"):
+        try:
+            with st.spinner("AI 正在思考…"):
+                explanation = session.explain()
+            st.session_state.messages.append(
+                {"role": "assistant", "text": f"💡 我换个说法：\n\n{explanation}"})
+            nxt = session.next_question()
+            if nxt:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"那我们再想想这个问题：\n\n{nxt}"})
+            st.rerun()
+        except DeepSeekAuthError:
+            st.session_state.messages.append(
+                {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+        except (DeepSeekError, SessionError) as exc:
+            st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+
     if st.session_state.step == "connections":
         render_connections()
+
+
+# ------------------------------------------------------------------- review
+
+def render_review_list() -> None:
+    st.markdown("## 📝 今日复习")
+    due = get_due_reviews()
+    if not due:
+        st.info("今天没有到期待复习的概念，先去学点新东西吧。")
+        if st.button("返回主页"):
+            go_home()
+        return
+
+    st.caption("以下概念到了复习时间，AI 会用上次学完时的追问来检验你。")
+    for c in due:
+        st.markdown(f"**{c['title']}**  {MASTERY_LABELS.get(c['mastery'], c['mastery'])}")
+        if st.button("开始复习", key=f"review_{c['id']}"):
+            st.session_state.review_session = ReviewSession(c["id"])
+            st.session_state.review_messages = []
+            st.session_state.review_finished = False
+            _navigate("review")
+        st.divider()
+    if st.button("返回主页"):
+        go_home()
+
+
+def render_review() -> None:
+    session = st.session_state.get("review_session")
+    if session is None:
+        _navigate("review_list")
+        return
+
+    st.markdown(f"## 📝 复习：{session.title}")
+
+    answer = st.chat_input("你的回答…")
+
+    if not st.session_state.get("review_messages"):
+        try:
+            with st.spinner("AI 正在出题…"):
+                question = session.start()
+            st.session_state.review_messages.append(
+                {"role": "assistant", "text": question})
+            st.rerun()
+        except DeepSeekAuthError:
+            st.error("Key 无效，请重新输入")
+        except (DeepSeekError, SessionError) as exc:
+            st.error(f"AI 调用失败：{exc}")
+        return
+
+    if answer and not st.session_state.get("review_finished"):
+        st.session_state.review_messages.append({"role": "user", "text": answer})
+        try:
+            with st.spinner("AI 正在判分…"):
+                result = session.submit_answer(answer)
+            if result["passed"]:
+                reply = f"✓ {result['feedback']}"
+            else:
+                reply = f"🤔 {result['feedback']}"
+                if result.get("needs_relearn"):
+                    reply += "\n\n📖 三次都没答对，需要重新学习这个概念。"
+            st.session_state.review_messages.append(
+                {"role": "assistant", "text": reply})
+            if session.phase == "finished":
+                st.session_state.review_finished = True
+            st.rerun()
+        except DeepSeekAuthError:
+            st.session_state.review_messages.append(
+                {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+            st.rerun()
+        except (DeepSeekError, SessionError) as exc:
+            st.session_state.review_messages.append(
+                {"role": "assistant", "text": f"❌ {exc}"})
+            st.rerun()
+        return
+
+    for m in st.session_state.review_messages:
+        role = m["role"]
+        bubble = "msg-user" if role == "user" else "msg-assistant"
+        st.markdown(f'<div class="{bubble}">{m["text"]}</div>', unsafe_allow_html=True)
+
+    if st.session_state.get("review_finished"):
+        if session.needs_relearn:
+            st.warning("三次都没答对，这个知识点建议重新学一遍。")
+        else:
+            st.success("复习通过，掌握更牢固了！")
+        if st.button("返回复习列表", use_container_width=True):
+            _navigate("review_list")
 
 
 # -------------------------------------------------------------- connections
@@ -214,16 +317,24 @@ def render_connections() -> None:
     st.caption("以下是 AI 认为和你刚学的概念有关的已学概念，可以编辑关系说明。")
     for i, conn in enumerate(session.recommended_connections):
         st.markdown(f"**{session.title}** ↔ **{conn.concept_title}**")
-        edited = st.text_input("它们的关系是：", value=conn.relation_text, key=f"rel_{i}")
+        edited = st.text_area("它们的关系是：", value=conn.relation_text,
+                              key=f"rel_{i}", height=100)
         target = next(
             (c for c in get_all_concepts() if c["title"] == conn.concept_title), None
         )
-        if st.button("确认这个连接", key=f"save_{i}"):
+        col_save, col_jump = st.columns(2)
+        with col_save:
+            if st.button("确认这个连接", key=f"save_{i}"):
+                if target is not None:
+                    save_connection(
+                        session.concept_id, target["id"], edited, is_user_edited=True
+                    )
+                    st.success("已保存")
+        with col_jump:
             if target is not None:
-                save_connection(
-                    session.concept_id, target["id"], edited, is_user_edited=True
-                )
-                st.success("已保存")
+                if st.button("查看该概念详情", key=f"view_{i}"):
+                    st.session_state.concept_detail_id = target["id"]
+                    _navigate("concept_detail")
         st.divider()
 
     if st.button("进入总结", type="primary", use_container_width=True):
@@ -304,6 +415,34 @@ def format_detail(concept: dict) -> str:
     return "\n".join(lines)
 
 
+def render_concept_detail() -> None:
+    """V0.2.2 — 概念详情页，支持从连接双向跳转。"""
+    cid = st.session_state.get("concept_detail_id")
+    concept = get_concept(cid) if cid else None
+    if concept is None:
+        st.error("这个概念不存在")
+        if st.button("返回主页"):
+            go_home()
+        return
+
+    st.markdown(f"## 📄 {concept['title']}")
+    st.markdown(format_detail(concept))
+
+    st.markdown("### 🔗 连接跳转")
+    conns = get_connections(concept["id"])
+    if not conns:
+        st.caption("（暂无连接）")
+    for conn in conns:
+        other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
+        other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
+        if st.button(f"去往「{other_title}」", key=f"jump_{conn['id']}"):
+            st.session_state.concept_detail_id = other_id
+            st.rerun()
+
+    if st.button("返回历史"):
+        _navigate("history")
+
+
 def render_history() -> None:
     st.markdown("## 📚 我的知识")
     concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
@@ -319,6 +458,16 @@ def render_history() -> None:
         format_func=lambda i: f"{concepts[i]['title']}  {MASTERY_LABELS.get(concepts[i]['mastery'], concepts[i]['mastery'])}",
     )
     st.markdown(format_detail(concepts[idx]))
+
+    conns = get_connections(concepts[idx]["id"])
+    if conns:
+        st.markdown("### 🔗 从连接跳转")
+        for conn in conns:
+            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concepts[idx]["id"] else conn["concept_b_id"]
+            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concepts[idx]["title"] else conn["concept_b_title"]
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_{conn['id']}"):
+                st.session_state.concept_detail_id = other_id
+                _navigate("concept_detail")
 
 
 # ---------------------------------------------------------------------- main
@@ -408,6 +557,12 @@ def main() -> None:
         render_connections()
     elif step == "summary":
         render_summary()
+    elif step == "review_list":
+        render_review_list()
+    elif step == "review":
+        render_review()
+    elif step == "concept_detail":
+        render_concept_detail()
     elif step == "history":
         render_history()
     elif step == "reconfigure":

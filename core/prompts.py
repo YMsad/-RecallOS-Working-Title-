@@ -245,6 +245,24 @@ AI 刚才的问题：{question}
 
 # ------------------------------------------------------------ daily summary
 
+def review_question_prompt(
+    *,
+    title: str,
+    source_text: str,
+) -> str:
+    """Ask the AI to craft a tough, provocative review question for a concept."""
+    return f"""今天是复习日。请为这个概念出一道刁钻、有挑战性但不刁难人的复习题。
+
+学习的概念：{title}
+来源原文：
+{source_text}
+
+要求：
+- 问题要能检验「学习者是真的懂了，还是只是背下来了」
+- 可以结合反事实（假如…会怎样）、认知反差、或和生活场景结合
+- 只输出这一个问题，不要任何解释、不要 JSON"""
+
+
 def summary_prompt(
     *,
     title: str,
