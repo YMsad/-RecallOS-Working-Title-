@@ -23,12 +23,13 @@ def table_names(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
-def test_init_creates_five_tables() -> None:
+def test_init_creates_six_tables() -> None:
     with database._get_conn() as conn:
         assert table_names(conn) == {
             "concepts",
             "qa_records",
             "connections",
+            "review_log",
             "daily_summaries",
             "settings",
         }

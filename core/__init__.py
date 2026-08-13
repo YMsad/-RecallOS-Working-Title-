@@ -45,11 +45,19 @@ from core.prompts import (
     parse_json_response,
     question_prompt,
     reference_answer_prompt,
+    review_question_prompt,
     simplify_question_prompt,
     summary_prompt,
     validate_response,
     validate_response_list,
     warmup_prompt,
+)
+from core.review import (
+    MAX_REVIEW_ATTEMPTS,
+    ReviewSession,
+    add_to_review_queue,
+    get_due_reviews,
+    update_review_status,
 )
 from core.session import LearningSession, SessionError, warmup_concept
 
@@ -89,6 +97,7 @@ __all__ = [
     "angle_shift_prompt",
     "explain_prompt",
     "warmup_prompt",
+    "review_question_prompt",
     "build_messages",
     "parse_json_response",
     "validate_response",
@@ -99,6 +108,11 @@ __all__ = [
     "LearningSession",
     "SessionError",
     "warmup_concept",
+    "ReviewSession",
+    "MAX_REVIEW_ATTEMPTS",
+    "add_to_review_queue",
+    "get_due_reviews",
+    "update_review_status",
 ]
 
 

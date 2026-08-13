@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -31,7 +32,10 @@ CREATE TABLE IF NOT EXISTS concepts (
     source_text TEXT,
     mastery TEXT NOT NULL DEFAULT '学习中',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    next_review_date DATE,
+    review_stage INTEGER NOT NULL DEFAULT 0,
+    review_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS qa_records (
@@ -57,6 +61,17 @@ CREATE TABLE IF NOT EXISTS connections (
     UNIQUE(concept_a_id, concept_b_id),
     CHECK (concept_a_id != concept_b_id),
     CHECK (concept_a_id < concept_b_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id INTEGER NOT NULL,
+    review_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    question TEXT NOT NULL,
+    user_answer TEXT,
+    passed INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (concept_id) REFERENCES concepts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS daily_summaries (
@@ -112,6 +127,19 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _get_conn() as conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add V0.2.2 columns to pre-existing concepts tables (idempotent)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(concepts)")}
+    for col, ddl in (
+        ("next_review_date", "next_review_date DATE"),
+        ("review_stage", "review_stage INTEGER NOT NULL DEFAULT 0"),
+        ("review_count", "review_count INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE concepts ADD COLUMN {ddl}")
 
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -162,6 +190,9 @@ def update_concept(
     user_definition: str | None = None,
     source_text: str | None = None,
     mastery: str | None = None,
+    next_review_date: str | None = None,
+    review_stage: int | None = None,
+    review_count: int | None = None,
 ) -> bool:
     """Update any subset of a concept's fields. Returns True if a row changed."""
     if mastery is not None and mastery not in MASTERY_VALUES:
@@ -175,6 +206,12 @@ def update_concept(
         fields["source_text"] = source_text
     if mastery is not None:
         fields["mastery"] = mastery
+    if next_review_date is not None:
+        fields["next_review_date"] = next_review_date
+    if review_stage is not None:
+        fields["review_stage"] = review_stage
+    if review_count is not None:
+        fields["review_count"] = review_count
     if not fields:
         return True
     set_clause = ", ".join(f"{key} = ?" for key in fields)
@@ -285,6 +322,65 @@ def get_all_connections() -> list[dict[str, Any]]:
             """
         ).fetchall()
         return _rows_to_dicts(rows)
+
+
+# --------------------------------------------------------------------- reviews
+
+def get_concepts_due_review(today: str | None = None) -> list[dict[str, Any]]:
+    """Return concepts whose next_review_date is today or overdue."""
+    if today is None:
+        today = date.today().isoformat()
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM concepts WHERE next_review_date IS NOT NULL "
+            "AND next_review_date <= ? ORDER BY next_review_date",
+            (today,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_all_review_logs(limit: int = 100) -> list[dict[str, Any]]:
+    """Return the most recent review log entries, newest first."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM review_log ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def get_review_logs(concept_id: int) -> list[dict[str, Any]]:
+    """Return review log entries for one concept, oldest first."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM review_log WHERE concept_id = ? ORDER BY created_at",
+            (concept_id,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def save_review_log(
+    concept_id: int,
+    question: str,
+    user_answer: str | None,
+    passed: bool,
+    review_date: str | None = None,
+) -> int:
+    """Record one review attempt and return its id."""
+    if review_date is None:
+        with _get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO review_log (concept_id, question, user_answer, passed) "
+                "VALUES (?, ?, ?, ?)",
+                (concept_id, question, user_answer, int(passed)),
+            )
+            return int(cur.lastrowid)
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO review_log (concept_id, review_date, question, user_answer, passed) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (concept_id, review_date, question, user_answer, int(passed)),
+        )
+        return int(cur.lastrowid)
 
 
 # ----------------------------------------------------------- daily_summaries
