@@ -219,6 +219,22 @@ def test_app_explain_button(monkeypatch, configured_app) -> None:
     assert "我换个说法" in markdown_text(at)
 
 
+def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app) -> None:
+    """每个回答只产生一个 AI 气泡（反馈与下一问合并），不会出现两个气泡。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = click_by_label(at, "开始")
+    at = at.chat_input[0].set_value("答").run()
+    assert not at.exception
+    msgs = at.session_state["messages"]
+    roles = [m["role"] for m in msgs]
+    assert roles == ["assistant", "user", "assistant"]
+    assert "✓ 对" in msgs[2]["text"]
+    assert "问题2" in msgs[2]["text"]
+
+
 def test_app_warmup_button_shows_prewarm_text(monkeypatch, configured_app) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
@@ -371,3 +387,84 @@ def test_app_connection_long_text_preserved(monkeypatch, configured_app) -> None
     assert not at.exception
     # 长关系说明应完整显示，而不是被截断成单行
     assert "都关于选择" in markdown_text(at)
+
+
+# --------------------------------------------------------------- usage stats
+
+
+def test_app_usage_stats_page(configured_app) -> None:
+    database.save_usage_log(model="deepseek-chat", prompt_tokens=100,
+                            completion_tokens=50, total_tokens=150, cost=0.001)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "用量统计")
+    assert not at.exception
+    assert current_step(at) == "usage_stats"
+    assert "用量统计" in markdown_text(at)
+    # 累计/本月/今日都应有 Token 数字（metric 的 value）
+    metric_values = [m.value for m in at.metric]
+    assert len(metric_values) == 3
+    assert any("150" in (v or "") for v in metric_values)
+
+
+def test_app_usage_stats_empty(configured_app) -> None:
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "用量统计")
+    assert not at.exception
+    assert current_step(at) == "usage_stats"
+    assert any("还没有用量数据" in (i.value or "") for i in at.info)
+
+
+# ---------------------------------------------------------------- V0.2.3
+
+
+def _seed_unfinished_concept() -> int:
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.save_qa(cid, "它关注过去还是未来？", "未来", True)
+    database.save_qa(cid, "和沉没成本的区别？", "一个看过去", False, hint_used=True)
+    return cid
+
+
+def test_continue_learning_entry(configured_app) -> None:
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not any("继续学习" in (b.label or "") for b in at.button)
+
+    _seed_unfinished_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert any("继续学习：机会成本" in (b.label or "") for b in at.button)
+
+
+def test_continue_learning_restores_messages(configured_app) -> None:
+    cid = _seed_unfinished_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.concept_id == cid
+
+    msgs = at.session_state["messages"]
+    assert len(msgs) == 4
+    assert msgs[0] == {"role": "assistant", "text": "它关注过去还是未来？"}
+    assert msgs[1] == {"role": "user", "text": "未来"}
+    assert msgs[2] == {"role": "assistant", "text": "和沉没成本的区别？"}
+    assert msgs[3] == {"role": "user", "text": "一个看过去"}
+    assert "它关注过去还是未来？" in markdown_text(at)
+
+
+def test_app_delete_concept_flow(configured_app) -> None:
+    cid = database.save_concept("机会成本", "原文")
+    database.save_qa(cid, "Q?", "A", True)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    at = click_by_label(at, "✕")
+    assert not at.exception
+    assert any("确认删除" in (b.label or "") for b in at.button)
+
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert database.get_concept(cid) is None
+    assert database.get_qa_history(cid) == []
+    assert any("还没有学习记录" in (i.value or "") for i in at.info)

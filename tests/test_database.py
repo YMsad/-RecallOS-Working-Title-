@@ -23,7 +23,7 @@ def table_names(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
-def test_init_creates_six_tables() -> None:
+def test_init_creates_seven_tables() -> None:
     with database._get_conn() as conn:
         assert table_names(conn) == {
             "concepts",
@@ -32,6 +32,7 @@ def test_init_creates_six_tables() -> None:
             "review_log",
             "daily_summaries",
             "settings",
+            "usage_logs",
         }
 
 
@@ -115,6 +116,31 @@ def test_cascade_delete_removes_qa_and_connections() -> None:
     assert database.get_all_connections() == []
 
 
+def test_delete_concept_cascade() -> None:
+    a = database.save_concept("机会成本")
+    b = database.save_concept("沉没成本")
+    database.save_qa(a, "它关注过去还是未来？", "未来", True)
+    database.save_connection(a, b, "一个看过去一个看未来")
+    database.save_review_log(a, "机会成本是什么？", "放弃的价值", True)
+    database.save_daily_summary(a, "我终于搞懂了机会成本", "明天再想")
+    database.save_usage_log(model="deepseek-chat", total_tokens=10, concept_id=a)
+
+    assert database.delete_concept(a) is True
+    assert database.get_concept(a) is None
+    assert database.get_qa_history(a) == []
+    assert database.get_connections(a) == []
+    assert database.get_all_connections() == []
+    assert database.get_review_logs(a) == []
+    assert database.get_daily_summaries_for_concept(a) == []
+    assert database.get_usage_summary()["calls"] == 0
+    # 与之建立连接的另一概念不受影响
+    assert database.get_concept(b) is not None
+
+
+def test_delete_concept_not_found() -> None:
+    assert database.delete_concept(999999) is False
+
+
 def test_foreign_key_enforced() -> None:
     with pytest.raises(sqlite3.IntegrityError):
         database.save_qa(999, "Q?", "A", True)
@@ -174,3 +200,68 @@ def test_settings_get_set() -> None:
     assert database.get_setting("streak") == "3"
     database.set_setting("streak", "4")
     assert database.get_setting("streak") == "4"
+
+
+# ----------------------------------------------------------------- usage_logs
+
+
+def test_save_usage_log_and_summary() -> None:
+    log_id = database.save_usage_log(
+        model="deepseek-chat",
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        cost=0.001,
+        session_id="s-1",
+        concept_id=1,
+    )
+    assert log_id > 0
+    summary = database.get_usage_summary()
+    assert summary["calls"] == 1
+    assert summary["prompt_tokens"] == 100
+    assert summary["completion_tokens"] == 50
+    assert summary["total_tokens"] == 150
+    assert summary["cost"] == 0.001
+
+
+def test_save_usage_log_defaults_to_zero() -> None:
+    database.save_usage_log()
+    row = database.get_usage_summary()
+    assert row["calls"] == 1
+    assert row["total_tokens"] == 0
+    assert row["cost"] == 0.0
+
+
+def test_usage_summary_aggregates_multiple_rows() -> None:
+    for _ in range(3):
+        database.save_usage_log(
+            model="deepseek-chat", prompt_tokens=10, completion_tokens=5,
+            total_tokens=15, cost=0.0005,
+        )
+    summary = database.get_usage_summary()
+    assert summary["calls"] == 3
+    assert summary["total_tokens"] == 45
+    assert round(summary["cost"], 4) == 0.0015
+
+
+def test_usage_summary_empty_db() -> None:
+    summary = database.get_usage_summary()
+    assert summary == {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                       "total_tokens": 0, "cost": 0.0}
+
+
+def test_usage_summary_since_filter() -> None:
+    database.save_usage_log(model="deepseek-chat", total_tokens=15)
+    # A far-past filter should include it; a far-future one should exclude it.
+    assert database.get_usage_summary(since="2000-01-01")["calls"] == 1
+    assert database.get_usage_summary(since="2999-01-01")["calls"] == 0
+
+
+def test_usage_trend_groups_by_day() -> None:
+    database.save_usage_log(model="deepseek-chat", total_tokens=15, cost=0.001)
+    database.save_usage_log(model="deepseek-chat", total_tokens=25, cost=0.002)
+    trend = database.get_usage_trend(days=7)
+    assert len(trend) == 1
+    assert trend[0]["calls"] == 2
+    assert trend[0]["total_tokens"] == 40
+    assert round(trend[0]["cost"], 4) == 0.003

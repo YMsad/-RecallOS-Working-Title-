@@ -1,5 +1,5 @@
-"""SQLite persistence layer — five tables: concepts, qa_records, connections,
-daily_summaries, settings.
+"""SQLite persistence layer — seven tables: concepts, qa_records, connections,
+daily_summaries, settings, review_log, usage_logs.
 
 Schema follows 技术文档.md (V0.1) with the Chinese table name "追问记录"
 corrected to ``qa_records``. All CRUD uses short-lived connections; point the
@@ -90,11 +90,24 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS usage_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    model TEXT,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0,
+    session_id TEXT,
+    concept_id INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_concepts_updated ON concepts(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qa_concept ON qa_records(concept_id);
 CREATE INDEX IF NOT EXISTS idx_connections_a ON connections(concept_a_id);
 CREATE INDEX IF NOT EXISTS idx_connections_b ON connections(concept_b_id);
 CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summaries(date);
+CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_logs(timestamp);
 """
 
 
@@ -226,10 +239,28 @@ def update_concept(
 
 
 def delete_concept(concept_id: int) -> bool:
-    """Delete a concept; cascades to qa_records and connections. Returns True if deleted."""
+    """删除概念及其关联的所有记录（级联删除）。
+
+    删除顺序：review_log → usage_logs → qa_records → connections → daily_summaries → concepts。
+    返回 True 表示删除成功，False 表示概念不存在。
+    """
     with _get_conn() as conn:
-        cur = conn.execute("DELETE FROM concepts WHERE id = ?", (concept_id,))
-        return cur.rowcount > 0
+        # 1. 删除 review_log
+        conn.execute("DELETE FROM review_log WHERE concept_id = ?", (concept_id,))
+        # 2. 删除 usage_logs
+        conn.execute("DELETE FROM usage_logs WHERE concept_id = ?", (concept_id,))
+        # 3. 删除 qa_records
+        conn.execute("DELETE FROM qa_records WHERE concept_id = ?", (concept_id,))
+        # 4. 删除 connections（作为 concept_a 或 concept_b）
+        conn.execute(
+            "DELETE FROM connections WHERE concept_a_id = ? OR concept_b_id = ?",
+            (concept_id, concept_id),
+        )
+        # 5. 删除 daily_summaries
+        conn.execute("DELETE FROM daily_summaries WHERE concept_id = ?", (concept_id,))
+        # 6. 删除 concepts
+        conn.execute("DELETE FROM concepts WHERE id = ?", (concept_id,))
+        return conn.total_changes > 0
 
 
 # ----------------------------------------------------------------- qa_records
@@ -457,3 +488,87 @@ def set_setting(key: str, value: str) -> None:
             "VALUES (?, ?, CURRENT_TIMESTAMP)",
             (key, value),
         )
+
+
+# ---------------------------------------------------------------- usage_logs
+
+def save_usage_log(
+    *,
+    model: str | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost: float = 0.0,
+    session_id: str | None = None,
+    concept_id: int | None = None,
+) -> int:
+    """Persist one API usage record and return its id.
+
+    Designed to be safe to call from the client: any DB failure here must not
+    break the calling flow, so callers are expected to wrap it in try/except.
+    """
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO usage_logs "
+            "(model, prompt_tokens, completion_tokens, total_tokens, cost, session_id, concept_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                model,
+                int(prompt_tokens or 0),
+                int(completion_tokens or 0),
+                int(total_tokens or 0),
+                float(cost or 0.0),
+                session_id,
+                concept_id,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_usage_summary(*, since: str | None = None) -> dict[str, Any]:
+    """Aggregate usage stats. ``since`` is a SQLite date/datetime filter value
+    (e.g. 'date(''now'')' for today, or 'datetime(''now'', ''-7 days'')')."""
+    where = ""
+    params: tuple[Any, ...] = ()
+    if since:
+        where = "WHERE timestamp >= ?"
+        params = (since,)
+    with _get_conn() as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS calls,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(cost), 0) AS cost
+            FROM usage_logs
+            {where}
+            """,
+            params,
+        ).fetchone()
+        result = dict(row)
+        result["calls"] = int(result["calls"])
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            result[k] = int(result[k])
+        result["cost"] = float(result["cost"])
+        return result
+
+
+def get_usage_trend(days: int = 7) -> list[dict[str, Any]]:
+    """Return per-day token/cost aggregates for the last ``days`` days
+    (oldest first), using 'YYYY-MM-DD' as the daily bucket key."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT date(timestamp) AS day,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(cost), 0) AS cost
+            FROM usage_logs
+            WHERE timestamp >= date('now', ?)
+            GROUP BY date(timestamp)
+            ORDER BY day
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+        return _rows_to_dicts(rows)
