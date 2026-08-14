@@ -14,6 +14,7 @@ from core import (
     LearningSession,
     ReviewSession,
     SessionError,
+    database,
     get_due_reviews,
     get_settings,
     init_db,
@@ -111,9 +112,6 @@ def render_home() -> None:
                      type="primary", use_container_width=True):
             _navigate("review_list")
 
-    title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
-    source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
-
     # V0.2.0 — 零基础/有基础模式切换 + 动态开场（2 个快速问题）
     mode = "beginner"
     if st.toggle("有基础（对这个概念有一定了解）", value=False, key="mode_toggle"):
@@ -128,12 +126,14 @@ def render_home() -> None:
         level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
         interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
 
-    # V0.2.0 — 概念预热（零基础模式）：开始前给 1-2 句最简单的大白话解释
-    if mode == "beginner":
-        if st.session_state.get("warmup_text"):
-            st.info(f"💡 {st.session_state['warmup_text']}")
-        elif title.strip():
-            if st.button("💡 先给我一句话预热", key="warmup_btn"):
+    # V0.2.3 — 预热按钮移到概念名输入框右侧（同一行，零基础模式）
+    col_title, col_warm = st.columns([5, 1])
+    with col_title:
+        title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
+    source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
+    with col_warm:
+        if mode == "beginner" and title.strip():
+            if st.button("💡 预热", key="warmup_btn"):
                 try:
                     with st.spinner("AI 正在生成预热解释…"):
                         st.session_state.warmup_text = warmup_concept(title, source)
@@ -142,6 +142,9 @@ def render_home() -> None:
                     st.error("Key 无效，请重新输入")
                 except DeepSeekError as exc:
                     st.error(f"AI 调用失败：{exc}")
+
+    if mode == "beginner" and st.session_state.get("warmup_text"):
+        st.info(f"💡 {st.session_state['warmup_text']}")
 
     # V0.2.3 — 继续学习入口：有未完成（学习中）的概念时显示在「开始」上方
     unfinished = [
@@ -207,6 +210,7 @@ def render_learning() -> None:
         try:
             with st.spinner("AI 正在思考…"):
                 result = session.submit_answer(answer)
+            # V0.2.3 — feedback 与下一个问题合并到同一条消息，避免一个回答生成两个气泡
             if result["correct"]:
                 reply = f"✓ {result['feedback']}"
             else:
@@ -215,14 +219,13 @@ def render_learning() -> None:
                     reply += f"\n\n💡 提示：{result['hint']}"
                 if result["reference"]:
                     reply += f"\n\n📖 参考：{result['reference']}"
-            st.session_state.messages.append({"role": "assistant", "text": reply})
-
             if result["is_done"]:
                 st.session_state.step = "connections"
             elif result["correct"] or result["reference"] or result["simplified"] or result["angle_shift"]:
                 nxt = session.next_question()
                 if nxt:
-                    st.session_state.messages.append({"role": "assistant", "text": nxt})
+                    reply += f"\n\n{nxt}"
+            st.session_state.messages.append({"role": "assistant", "text": reply})
         except DeepSeekAuthError:
             st.session_state.messages.append(
                 {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
@@ -236,12 +239,11 @@ def render_learning() -> None:
         try:
             with st.spinner("AI 正在思考…"):
                 explanation = session.explain()
-            st.session_state.messages.append(
-                {"role": "assistant", "text": f"💡 我换个说法：\n\n{explanation}"})
+            reply = f"💡 我换个说法：\n\n{explanation}"
             nxt = session.next_question()
             if nxt:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"那我们再想想这个问题：\n\n{nxt}"})
+                reply += f"\n\n那我们再想想这个问题：\n\n{nxt}"
+            st.session_state.messages.append({"role": "assistant", "text": reply})
             st.rerun()
         except DeepSeekAuthError:
             st.session_state.messages.append(
@@ -522,10 +524,42 @@ def render_history() -> None:
             go_home()
         return
 
+    # ---- V0.2.3: 概念列表（每项带「✕」删除按钮，两步确认）----
+    st.markdown("### 📋 我的概念")
+    for c in concepts:
+        col_l, col_x = st.columns([6, 1])
+        with col_l:
+            st.markdown(f"**{c['title']}**  {MASTERY_LABELS.get(c['mastery'], c['mastery'])}")
+        with col_x:
+            if st.button("✕", key=f"xdel_{c['id']}"):
+                st.session_state[f"confirm_x_{c['id']}"] = True
+                st.rerun()
+
+    pending_delete = next(
+        (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
+    )
+    if pending_delete is not None:
+        st.warning(
+            f"确定删除「{pending_delete['title']}」吗？"
+            "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
+        )
+        col_ok, col_no = st.columns(2)
+        with col_ok:
+            if st.button("确认删除", type="primary", key=f"confirm_ok_{pending_delete['id']}"):
+                delete_concept(pending_delete["id"])
+                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
+                _navigate("history")
+        with col_no:
+            if st.button("取消", key=f"confirm_no_{pending_delete['id']}"):
+                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
+                st.rerun()
+    st.divider()
+
     idx = st.selectbox(
         "选择概念查看详情",
         range(len(concepts)),
         format_func=lambda i: f"{concepts[i]['title']}  {MASTERY_LABELS.get(concepts[i]['mastery'], concepts[i]['mastery'])}",
+        key="history_select",
     )
     concept = concepts[idx]
 
@@ -571,26 +605,6 @@ def render_history() -> None:
             if st.button(f"去往「{other_title}」", key=f"hist_jump_{idx}_{conn['id']}"):
                 st.session_state.concept_detail_id = other_id
                 _navigate("concept_detail")
-
-    # ---- V0.2.3: 删除概念（级联清理所有关联记录）----
-    st.divider()
-    confirm_key = f"confirm_delete_{concept['id']}"
-    if st.session_state.get(confirm_key):
-        st.warning("删除后该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。")
-        col_del, col_cancel = st.columns(2)
-        with col_del:
-            if st.button("确认删除", type="primary", key=f"confirm_del_{concept['id']}"):
-                delete_concept(concept["id"])
-                st.session_state.pop(confirm_key, None)
-                _navigate("history")
-        with col_cancel:
-            if st.button("取消", key=f"cancel_del_{concept['id']}"):
-                st.session_state.pop(confirm_key, None)
-                st.rerun()
-    else:
-        if st.button("🗑️ 删除此概念", key=f"del_btn_{concept['id']}"):
-            st.session_state[confirm_key] = True
-            st.rerun()
 
 
 # ---------------------------------------------------------------------- main
@@ -670,6 +684,19 @@ def render_usage_stats() -> None:
 def inject_css() -> None:
     st.markdown(
         """<style>
+        /* V0.2.3 — 全局字体 +2px（默认 14px → 16px） */
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+            font-size: 16px;
+        }
+        [data-testid="stMarkdownContainer"], [data-testid="stText"],
+        [data-testid="stCaptionContainer"] {
+            font-size: 16px;
+        }
+        .stTextInput input, .stTextArea textarea, .stChatInput textarea,
+        .stButton button, .stSelectbox > div, .stRadio label, .stCheckbox label,
+        .stToggle label, .stCaption {
+            font-size: 16px !important;
+        }
         div.msg-bubble-box div.msg-assistant, div.msg-assistant {
             background: #F5EFE6; padding: 10px 14px; border-radius: 12px;
             margin: 6px 0; line-height: 1.6;

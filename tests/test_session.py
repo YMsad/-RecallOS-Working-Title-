@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 import httpx
 import pytest
@@ -376,11 +377,18 @@ def test_route_layer4_uses_analogy() -> None:
     assert session._route_model(4) == "analogy"
 
 
-def test_route_beginner_uses_scenario() -> None:
+def test_route_beginner_uses_scenario_and_golden_circle() -> None:
     session, _ = make_session(text_reply("Q1"))
     assert session._route_model(1) == "scenario"
     assert session._route_model(2) == "scenario"
-    assert session._route_model(3) == "scenario"
+    assert session._route_model(3) == "golden_circle"
+
+
+def test_route_advanced_streak_layer3_uses_golden_circle() -> None:
+    session, _ = make_session(text_reply("Q1"), mode="advanced")
+    assert session._route_model(1) == "first_principles"
+    assert session._route_model(2) == "first_principles"
+    assert session._route_model(3) == "golden_circle"
 
 
 def test_route_advanced_streak_uses_first_principles() -> None:
@@ -410,3 +418,27 @@ def test_question_payload_includes_routed_model() -> None:
         p for p in transport.requests if "第二层追问" in p["messages"][1]["content"]
     )
     assert "思维模型【第一性原理】" in payload["messages"][1]["content"]
+
+
+# ------------------------------------------------------- V0.2.3 review queue
+
+
+def test_learning_complete_queues_review_without_finish() -> None:
+    """学习完成后（即使不进入总结），概念也必须加入复习队列。"""
+    session, _ = make_session(
+        text_reply("Q1"),
+        judge(True, "对"),
+        text_reply("Q2"),
+        judge(True, "对"),
+        text_reply("Q3"),
+        judge(True, "对"),
+        text_reply("Q4"),
+        judge(True, "对"),
+    )
+    session.start()
+    for _ in range(4):
+        session.submit_answer("答")
+    assert session.phase == "connections"
+    row = database.get_concept(session.concept_id)
+    expected = (date.today() + timedelta(days=1)).isoformat()
+    assert row["next_review_date"] == expected

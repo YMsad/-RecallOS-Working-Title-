@@ -219,6 +219,22 @@ def test_app_explain_button(monkeypatch, configured_app) -> None:
     assert "我换个说法" in markdown_text(at)
 
 
+def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app) -> None:
+    """每个回答只产生一个 AI 气泡（反馈与下一问合并），不会出现两个气泡。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    at = click_by_label(at, "开始")
+    at = at.chat_input[0].set_value("答").run()
+    assert not at.exception
+    msgs = at.session_state["messages"]
+    roles = [m["role"] for m in msgs]
+    assert roles == ["assistant", "user", "assistant"]
+    assert "✓ 对" in msgs[2]["text"]
+    assert "问题2" in msgs[2]["text"]
+
+
 def test_app_warmup_button_shows_prewarm_text(monkeypatch, configured_app) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
@@ -442,7 +458,7 @@ def test_app_delete_concept_flow(configured_app) -> None:
     database.save_qa(cid, "Q?", "A", True)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = click_by_label(at, "历史回顾")
-    at = click_by_label(at, "删除此概念")
+    at = click_by_label(at, "✕")
     assert not at.exception
     assert any("确认删除" in (b.label or "") for b in at.button)
 

@@ -186,6 +186,9 @@ class LearningSession:
 
         if self.layer > MAX_LAYER:
             self.phase = "connections"
+            # V0.2.3 — 学习完成即加入复习队列（无论是否走完总结等后续流程）
+            add_to_review_queue(cid)
+            logger.info("概念已加入复习队列: %s", cid)
         result["is_done"] = self.phase != "learning"
         return result
 
@@ -265,7 +268,6 @@ class LearningSession:
             user_definition=user_definition or None,
             mastery=mastery,
         )
-        add_to_review_queue(cid)
         self.phase = "finished"
         logger.info("Session finished for concept %s (mastery=%s)", self.title, mastery)
         return self.summary
@@ -311,21 +313,24 @@ class LearningSession:
 
     def _route_model(self, layer: int) -> str | None:
         """V0.2.1 — 思维模型自动路由：根据用户表现自动选择追问模型，不加选择负担。
+        V0.2.3 — 增加趣味性：第 3 层（反事实）统一换用黄金圈，避免全程同一个模型。
 
         - 第 4 层（连接）→ 类比：用「这就像你之前学的 X…」引导连接
         - 零基础模式 → 场景化：让抽象概念落地到生活场景
+          （第 3 层改用黄金圈，保持新鲜感）
         - 有基础模式：
-          - 已连续答对 → 第一性原理：往更深处拆
+          - 已连续答对 → 第 1-2 层第一性原理：往更深处拆；
+            第 3 层换黄金圈：回到 Why，夯实根本
           - 出现连错 / 换过角度 → 黄金圈：回到 Why，重新夯实根本
         - 其余情况不注入特定模型（默认苏格拉底四层追问）
         """
         if layer == 4:
             return "analogy"
         if self.mode == "beginner":
-            return "scenario"
+            return "golden_circle" if layer == 3 else "scenario"
         if self.mode == "advanced":
             if self.consecutive_failures == 0 and not self.marked_uncertain:
-                return "first_principles"
+                return "golden_circle" if layer == 3 else "first_principles"
             return "golden_circle"
         return None
 
