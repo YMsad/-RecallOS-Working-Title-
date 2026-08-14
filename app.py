@@ -5,6 +5,7 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from core import (
@@ -21,6 +22,7 @@ from core import (
     warmup_concept,
 )
 from core.database import (
+    delete_concept,
     get_all_concepts,
     get_all_connections,
     get_concept,
@@ -30,10 +32,13 @@ from core.database import (
     get_recent_concepts,
     get_setting,
     get_today_summary,
+    get_usage_summary,
+    get_usage_trend,
     save_connection,
     set_setting,
 )
 from core.models import MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
+from core.session import MAX_LAYER
 
 MASTERY_LABELS = {
     MASTERY_UNDERSTOOD: "✅ 搞懂了",
@@ -61,6 +66,33 @@ def go_home() -> None:
 
 def _navigate(target: str) -> None:
     st.session_state.step = target
+    st.rerun()
+
+
+def _resume_learning(concept: dict) -> None:
+    """V0.2.3 — 从数据库恢复未完成的学习会话（重建 session 与 messages）。"""
+    session = LearningSession(concept["title"], concept.get("source_text") or "")
+    session.concept_id = concept["id"]
+    history = get_qa_history(concept["id"])
+    messages: list[dict] = []
+    for qa in history:
+        messages.append({"role": "assistant", "text": qa["question"]})
+        if qa.get("user_answer"):
+            messages.append({"role": "user", "text": qa["user_answer"]})
+        session.qa_history.append(
+            {
+                "question": qa["question"],
+                "answer": qa.get("user_answer"),
+                "is_correct": bool(qa.get("is_correct")),
+                "hint": None,
+            }
+        )
+    if history:
+        session.layer = min(MAX_LAYER, len(history))
+        session._current_question = history[-1]["question"]
+    st.session_state.session = session
+    st.session_state.messages = messages
+    st.session_state.step = "learning"
     st.rerun()
 
 
@@ -111,7 +143,17 @@ def render_home() -> None:
                 except DeepSeekError as exc:
                     st.error(f"AI 调用失败：{exc}")
 
-    if st.button("开始", type="primary", use_container_width=True):
+    # V0.2.3 — 继续学习入口：有未完成（学习中）的概念时显示在「开始」上方
+    unfinished = [
+        c for c in get_all_concepts()
+        if c.get("mastery") in (None, MASTERY_LEARNING)
+    ]
+    if unfinished:
+        c = unfinished[0]
+        if st.button(f"📖 继续学习：{c['title']}", key="continue_learning"):
+            _resume_learning(c)
+
+    if st.button("开始", type="primary", use_container_width=True, key="start_learning"):
         if not title.strip():
             st.info("试试粘贴一段课本内容")
         else:
@@ -443,6 +485,34 @@ def render_concept_detail() -> None:
         _navigate("history")
 
 
+def _render_concept_detail_without_edit(concept: dict) -> None:
+    """在没有 user_definition 时，仅正常显示概念详情（不带编辑入口）。"""
+    st.markdown(format_detail(concept))
+
+    conns = get_connections(concept["id"])
+    if conns:
+        st.markdown("### 🔗 从连接跳转")
+        for conn in conns:
+            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
+            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_wo_{conn['id']}"):
+                st.session_state.concept_detail_id = other_id
+                _navigate("concept_detail")
+
+
+def _render_concept_detail_with_edit_button(concept: dict) -> None:
+    """在概念详情中显示「我的理解」和「编辑」入口。"""
+    # 显示用户理解
+    if concept.get("user_definition"):
+        st.markdown(f"**我的理解：**{concept['user_definition']}")
+    else:
+        st.caption("（暂无理解记录）")
+
+    # 编辑入口
+    if st.button("✏️ 编辑", key=f"edit_def_{concept['id']}"):
+        st.session_state[f"edit_def_{concept['id']}"] = concept.get("user_definition", "")
+
+
 def render_history() -> None:
     st.markdown("## 📚 我的知识")
     concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
@@ -457,17 +527,70 @@ def render_history() -> None:
         range(len(concepts)),
         format_func=lambda i: f"{concepts[i]['title']}  {MASTERY_LABELS.get(concepts[i]['mastery'], concepts[i]['mastery'])}",
     )
-    st.markdown(format_detail(concepts[idx]))
+    concept = concepts[idx]
 
-    conns = get_connections(concepts[idx]["id"])
+    # ---- V0.2.3: 「我的理解」编辑功能（仅在有内容时显示）----
+    if concept.get("user_definition"):
+        edit_key = f"edit_def_{concept['id']}"
+        if st.session_state.get(edit_key) is not None:
+            # 编辑模式
+            edited = st.text_area(
+                "我的理解",
+                value=st.session_state[edit_key],
+                key=edit_key,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("保存", key=f"save_{edit_key}"):
+                    database.update_concept(
+                        concept["id"], user_definition=edited.strip()
+                    )
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+            with c2:
+                if st.button("取消", key=f"cancel_{edit_key}"):
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+        else:
+            # 初始状态：显示用户理解和编辑按钮
+            st.markdown(f"**我的理解：**{concept['user_definition']}")
+            if st.button("✏️ 编辑", key=f"edit_def_{concept['id']}"):
+                st.session_state[edit_key] = concept["user_definition"]
+                st.rerun()
+    else:
+        # 无 user_definition：仅正常显示详情（不带编辑入口）
+        _render_concept_detail_without_edit(concept)
+    # ---- 结束 V0.2.3 ----
+
+    conns = get_connections(concept["id"])
     if conns:
         st.markdown("### 🔗 从连接跳转")
         for conn in conns:
-            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concepts[idx]["id"] else conn["concept_b_id"]
-            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concepts[idx]["title"] else conn["concept_b_title"]
-            if st.button(f"去往「{other_title}」", key=f"hist_jump_{conn['id']}"):
+            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
+            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_{idx}_{conn['id']}"):
                 st.session_state.concept_detail_id = other_id
                 _navigate("concept_detail")
+
+    # ---- V0.2.3: 删除概念（级联清理所有关联记录）----
+    st.divider()
+    confirm_key = f"confirm_delete_{concept['id']}"
+    if st.session_state.get(confirm_key):
+        st.warning("删除后该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。")
+        col_del, col_cancel = st.columns(2)
+        with col_del:
+            if st.button("确认删除", type="primary", key=f"confirm_del_{concept['id']}"):
+                delete_concept(concept["id"])
+                st.session_state.pop(confirm_key, None)
+                _navigate("history")
+        with col_cancel:
+            if st.button("取消", key=f"cancel_del_{concept['id']}"):
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
+    else:
+        if st.button("🗑️ 删除此概念", key=f"del_btn_{concept['id']}"):
+            st.session_state[confirm_key] = True
+            st.rerun()
 
 
 # ---------------------------------------------------------------------- main
@@ -516,6 +639,34 @@ def render_reconfigure() -> None:
         go_home()
 
 
+def render_usage_stats() -> None:
+    """V0.2.2 — 用量统计页：今日/本月/累计 Token 与成本 + 近 7 天趋势。"""
+    st.markdown("## 📊 用量统计")
+
+    today = get_usage_summary(since="date('now')")
+    month = get_usage_summary(since="date('now','start of month')")
+    total = get_usage_summary()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("今日 Token", f"{today['total_tokens']:,}")
+    c1.caption(f"调用 {today['calls']} 次 · 今日 {today['cost']:.4f} 元")
+    c2.metric("本月 Token", f"{month['total_tokens']:,}")
+    c2.caption(f"调用 {month['calls']} 次 · 本月 {month['cost']:.4f} 元")
+    c3.metric("累计 Token", f"{total['total_tokens']:,}")
+    c3.caption(f"调用 {total['calls']} 次 · 总成本 {total['cost']:.4f} 元")
+
+    st.divider()
+    st.markdown("### 近 7 天消耗趋势")
+    trend = get_usage_trend(days=7)
+    if not trend:
+        st.info("还没有用量数据，去学一次就有啦。")
+        return
+    rows = [(t["day"], f"{t['total_tokens']:,}", t["calls"], f"{t['cost']:.4f}")
+            for t in trend]
+    st.table(pd.DataFrame(rows, columns=["日期", "Token", "调用次数", "成本(元)"]))
+    st.caption("说明：成本按 DeepSeek 公开价估算（输入 ¥0.27/1M tokens，输出 ¥1.10/1M tokens）。")
+
+
 def inject_css() -> None:
     st.markdown(
         """<style>
@@ -547,6 +698,8 @@ def main() -> None:
             go_home()
         if st.button("📚 历史回顾"):
             _navigate("history")
+        if st.button("📊 用量统计"):
+            _navigate("usage_stats")
         if st.button("🔑 重新配置 API Key"):
             _navigate("reconfigure")
 
@@ -565,6 +718,8 @@ def main() -> None:
         render_concept_detail()
     elif step == "history":
         render_history()
+    elif step == "usage_stats":
+        render_usage_stats()
     elif step == "reconfigure":
         render_reconfigure()
     else:

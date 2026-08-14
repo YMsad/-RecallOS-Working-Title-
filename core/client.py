@@ -10,8 +10,28 @@ from typing import Any
 import httpx
 
 from core.config import Settings, get_settings
+from core.database import save_usage_log
 
 logger = logging.getLogger(__name__)
+
+# CNY per 1M tokens — DeepSeek list prices (cache-miss input / output).
+# Falls back to the deepseek-chat tier for models without an explicit entry.
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "deepseek-chat": (0.27, 1.10),
+    "deepseek-reasoner": (2.00, 8.00),
+    "deepseek-v4-flash": (0.27, 1.10),
+}
+_DEFAULT_PRICING: tuple[float, float] = (0.27, 1.10)
+
+
+def _estimate_cost(
+    model: str, prompt_tokens: int, completion_tokens: int
+) -> float:
+    """Estimate CNY cost for a request using DeepSeek list pricing (¥/1M tokens)."""
+    input_price, output_price = _MODEL_PRICING.get(model, _DEFAULT_PRICING)
+    return (
+        (prompt_tokens * input_price) + (completion_tokens * output_price)
+    ) / 1_000_000.0
 
 
 class DeepSeekError(Exception):
@@ -90,10 +110,17 @@ class DeepSeekClient:
         temperature: float = 0.7,
         max_tokens: int = 2000,
         model: str | None = None,
+        session_id: str | None = None,
+        concept_id: int | None = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
         data = self.chat_completion(
-            messages, temperature=temperature, max_tokens=max_tokens, model=model
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+            session_id=session_id,
+            concept_id=concept_id,
         )
         try:
             return data["choices"][0]["message"]["content"]
@@ -106,6 +133,8 @@ class DeepSeekClient:
         temperature: float = 0.7,
         max_tokens: int = 2000,
         model: str | None = None,
+        session_id: str | None = None,
+        concept_id: int | None = None,
     ) -> dict[str, Any]:
         """POST /chat/completions with retry logic. Returns the parsed JSON body."""
         payload: dict[str, Any] = {
@@ -122,6 +151,7 @@ class DeepSeekClient:
                 body = self._post("/chat/completions", payload)
                 self.request_count += 1
                 self._record_usage(body)
+                self._persist_usage(body, session_id=session_id, concept_id=concept_id)
                 return body
             except DeepSeekError as exc:
                 if not self._is_retryable(exc):
@@ -146,6 +176,36 @@ class DeepSeekClient:
             if isinstance(value, (int, float)):
                 self.total_usage[key] = self.total_usage.get(key, 0) + value
         logger.info("Token usage: %s", usage)
+
+    def _persist_usage(
+        self,
+        body: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        concept_id: int | None = None,
+    ) -> None:
+        """Persist one usage record to the DB. Never raises — failures are
+        logged and ignored so usage tracking can never break the main flow."""
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            return
+        model = body.get("model") or self.settings.deepseek_model
+        try:
+            save_usage_log(
+                model=model,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                total_tokens=usage.get("total_tokens") or 0,
+                cost=_estimate_cost(
+                    model,
+                    usage.get("prompt_tokens") or 0,
+                    usage.get("completion_tokens") or 0,
+                ),
+                session_id=session_id,
+                concept_id=concept_id,
+            )
+        except Exception:  # noqa: BLE001 — never let tracking break the flow
+            logger.exception("Failed to persist usage log")
 
     def usage_summary(self) -> dict[str, int]:
         """Aggregated token usage across all completed chat requests."""

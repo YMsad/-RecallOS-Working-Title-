@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from core import get_settings
+from core import database
 from core.client import (
     DeepSeekAPIError,
     DeepSeekAuthError,
@@ -26,6 +27,12 @@ TEST_SETTINGS = Settings(
     retry_backoff=0.0,
     retry_jitter=0.0,
 )
+
+
+@pytest.fixture(autouse=True)
+def fresh_db(tmp_path):
+    database.configure(tmp_path / "test.db")
+    yield
 
 
 def make_client(handler) -> DeepSeekClient:
@@ -119,6 +126,50 @@ def test_usage_ignored_when_absent() -> None:
         client.chat([{"role": "user", "content": "hi"}])
     assert client.usage_records == []
     assert client.usage_summary() == {"requests": 1}
+
+
+def test_usage_persisted_to_database() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            },
+        )
+
+    with make_client(handler) as client:
+        client.chat(
+            [{"role": "user", "content": "hi"}],
+            session_id="sess-1",
+            concept_id=7,
+        )
+
+    summary = database.get_usage_summary()
+    assert summary["calls"] == 1
+    assert summary["prompt_tokens"] == 100
+    assert summary["completion_tokens"] == 50
+    assert summary["total_tokens"] == 150
+    assert summary["cost"] > 0
+
+
+def test_usage_persistence_failure_does_not_break_chat(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "core.database.save_usage_log",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    with make_client(handler) as client:
+        assert client.chat([{"role": "user", "content": "hi"}]) == "hi"
 
 
 def test_retries_then_succeeds_on_429() -> None:
