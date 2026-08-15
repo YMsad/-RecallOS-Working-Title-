@@ -534,6 +534,34 @@ def test_app_delete_from_table(configured_app) -> None:
     assert "📖 学习中" in markdown_text(at)
 
 
+def test_app_history_view_and_delete_buttons_via_callback(configured_app) -> None:
+    """查看 / ✕ / 确认删除 全部走 on_click 回调：同组多概念时切换与删除即时生效。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.update_concept(b, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 点「查看」切换到 b，详情随之更新
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+    # 点「✕」弹出确认框，但数据暂未删除
+    at = at.button(key=f"xdel_{a}").click().run()
+    assert not at.exception
+    assert any("确认删除" in (btn.label or "") for btn in at.button)
+    assert database.get_concept(a) is not None
+    # 点「确认删除」→ 回调删除并刷新列表，详情切回剩余概念
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert database.get_concept(a) is None
+    assert database.get_concept(b) is not None
+    assert "机会成本" not in markdown_text(at)
+    assert "沉没成本" in markdown_text(at)
+
+
 # ---------------------------------------------------------------- V0.3.0 UI
 
 

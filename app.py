@@ -830,6 +830,26 @@ def _render_concept_detail_with_edit_button(concept: dict) -> None:
         st.session_state[f"edit_def_{concept['id']}"] = concept.get("user_definition", "")
 
 
+# ---- 历史页按钮使用 on_click 回调（事件由服务端处理，不依赖按钮返回值的 rerun 触发）----
+def _select_history_concept(cid: int) -> None:
+    st.session_state.history_view_id = cid
+
+
+def _request_delete_concept(cid: int) -> None:
+    st.session_state[f"confirm_x_{cid}"] = True
+
+
+def _cancel_delete_concept(cid: int) -> None:
+    st.session_state.pop(f"confirm_x_{cid}", None)
+
+
+def _confirm_delete_concept(cid: int) -> None:
+    delete_concept(cid)
+    st.session_state.pop(f"confirm_x_{cid}", None)
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
+
+
 def render_history() -> None:
     st.markdown("## 📚 我的知识")
     concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
@@ -863,13 +883,19 @@ def render_history() -> None:
                 with col_a:
                     bv, bx = st.columns(2)
                     with bv:
-                        if st.button("查看", key=f"view_{c['id']}"):
-                            st.session_state.history_view_id = c["id"]
-                            st.rerun()
+                        st.button(
+                            "查看",
+                            key=f"view_{c['id']}",
+                            on_click=_select_history_concept,
+                            args=(c["id"],),
+                        )
                     with bx:
-                        if st.button("✕", key=f"xdel_{c['id']}"):
-                            st.session_state[f"confirm_x_{c['id']}"] = True
-                            st.rerun()
+                        st.button(
+                            "✕",
+                            key=f"xdel_{c['id']}",
+                            on_click=_request_delete_concept,
+                            args=(c["id"],),
+                        )
                 if i < len(group) - 1:
                     st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
 
@@ -883,16 +909,20 @@ def render_history() -> None:
         )
         col_ok, col_no = st.columns(2)
         with col_ok:
-            if st.button("确认删除", type="primary", key=f"confirm_ok_{pending_delete['id']}"):
-                delete_concept(pending_delete["id"])
-                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
-                if st.session_state.get("history_view_id") == pending_delete["id"]:
-                    st.session_state.history_view_id = None
-                _navigate("history")
+            st.button(
+                "确认删除",
+                type="primary",
+                key=f"confirm_ok_{pending_delete['id']}",
+                on_click=_confirm_delete_concept,
+                args=(pending_delete["id"],),
+            )
         with col_no:
-            if st.button("取消", key=f"confirm_no_{pending_delete['id']}"):
-                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
-                st.rerun()
+            st.button(
+                "取消",
+                key=f"confirm_no_{pending_delete['id']}",
+                on_click=_cancel_delete_concept,
+                args=(pending_delete["id"],),
+            )
     st.divider()
 
     concept = next(
