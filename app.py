@@ -528,7 +528,7 @@ def render_history() -> None:
     if st.session_state.get("history_view_id") is None:
         st.session_state.history_view_id = concepts[0]["id"]
 
-    # ---- V0.2.3: 三个独立表格，按掌握度分组（概念名称 / 操作，行内查看与两步删除）----
+    # ---- V0.2.3: 三个独立表格，按掌握度分组（概念名称 / 操作，行内用分割线分隔）----
     for group_key in _MASTERY_ORDER:
         group = [c for c in concepts if c["mastery"] == group_key]
         if not group:
@@ -540,7 +540,8 @@ def render_history() -> None:
                 st.markdown("**概念名称**")
             with hd_a:
                 st.markdown("**操作**")
-            for c in group:
+            st.divider()
+            for i, c in enumerate(group):
                 col_l, col_a = st.columns([6, 4])
                 with col_l:
                     st.markdown(f"**{c['title']}**")
@@ -554,6 +555,8 @@ def render_history() -> None:
                         if st.button("✕", key=f"xdel_{c['id']}"):
                             st.session_state[f"confirm_x_{c['id']}"] = True
                             st.rerun()
+                if i < len(group) - 1:
+                    st.divider()
 
     pending_delete = next(
         (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
