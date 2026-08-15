@@ -524,16 +524,28 @@ def render_history() -> None:
             go_home()
         return
 
-    # ---- V0.2.3: 概念列表（每项带「✕」删除按钮，两步确认）----
-    st.markdown("### 📋 我的概念")
-    for c in concepts:
-        col_l, col_x = st.columns([6, 1])
-        with col_l:
-            st.markdown(f"**{c['title']}**  {MASTERY_LABELS.get(c['mastery'], c['mastery'])}")
-        with col_x:
-            if st.button("✕", key=f"xdel_{c['id']}"):
-                st.session_state[f"confirm_x_{c['id']}"] = True
-                st.rerun()
+    # 默认查看第一个概念（保持详情可直达）
+    if st.session_state.get("history_view_id") is None:
+        st.session_state.history_view_id = concepts[0]["id"]
+
+    # ---- V0.2.3: 按掌握度分组的概念列表（每项：查看 / ✕ 两步确认删除）----
+    for group_key in _MASTERY_ORDER:
+        group = [c for c in concepts if c["mastery"] == group_key]
+        if not group:
+            continue
+        st.markdown(f"### {MASTERY_LABELS[group_key]}（{len(group)}）")
+        for c in group:
+            col_l, col_v, col_x = st.columns([6, 1, 1])
+            with col_l:
+                st.markdown(f"**{c['title']}**")
+            with col_v:
+                if st.button("查看", key=f"view_{c['id']}"):
+                    st.session_state.history_view_id = c["id"]
+                    st.rerun()
+            with col_x:
+                if st.button("✕", key=f"xdel_{c['id']}"):
+                    st.session_state[f"confirm_x_{c['id']}"] = True
+                    st.rerun()
 
     pending_delete = next(
         (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
@@ -548,6 +560,8 @@ def render_history() -> None:
             if st.button("确认删除", type="primary", key=f"confirm_ok_{pending_delete['id']}"):
                 delete_concept(pending_delete["id"])
                 st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
+                if st.session_state.get("history_view_id") == pending_delete["id"]:
+                    st.session_state.history_view_id = None
                 _navigate("history")
         with col_no:
             if st.button("取消", key=f"confirm_no_{pending_delete['id']}"):
@@ -555,13 +569,12 @@ def render_history() -> None:
                 st.rerun()
     st.divider()
 
-    idx = st.selectbox(
-        "选择概念查看详情",
-        range(len(concepts)),
-        format_func=lambda i: f"{concepts[i]['title']}  {MASTERY_LABELS.get(concepts[i]['mastery'], concepts[i]['mastery'])}",
-        key="history_select",
+    concept = next(
+        (c for c in concepts if c["id"] == st.session_state.get("history_view_id")), None
     )
-    concept = concepts[idx]
+    if concept is None:
+        st.caption("点击上方「查看」按钮查看概念详情。")
+        return
 
     # ---- V0.2.3: 「我的理解」编辑功能（仅在有内容时显示）----
     if concept.get("user_definition"):
@@ -602,7 +615,7 @@ def render_history() -> None:
         for conn in conns:
             other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
             other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
-            if st.button(f"去往「{other_title}」", key=f"hist_jump_{idx}_{conn['id']}"):
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_{concept['id']}_{conn['id']}"):
                 st.session_state.concept_detail_id = other_id
                 _navigate("concept_detail")
 

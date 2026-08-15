@@ -187,6 +187,8 @@ def test_app_history_view(monkeypatch, configured_app) -> None:
     assert not at.exception
     assert current_step(at) == "history"
     assert "机会成本" in markdown_text(at)
+    # 按掌握度分组展示
+    assert "✅ 搞懂了" in markdown_text(at)
 
 
 def test_app_mode_toggle_on_home(configured_app) -> None:
@@ -468,3 +470,35 @@ def test_app_delete_concept_flow(configured_app) -> None:
     assert database.get_concept(cid) is None
     assert database.get_qa_history(cid) == []
     assert any("还没有学习记录" in (i.value or "") for i in at.info)
+
+
+def test_app_delete_from_list(configured_app) -> None:
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.save_qa(b, "Q?", "A", True)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 按掌握度分组展示（搞懂了 / 学习中），没有「模糊」分组
+    assert "✅ 搞懂了" in markdown_text(at)
+    assert "📖 学习中" in markdown_text(at)
+    assert "🔄 模糊" not in markdown_text(at)
+    # 行内「查看」按钮切换详情选中
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert "history_view_id" in at.session_state
+    assert at.session_state["history_view_id"] == b
+    assert "沉没成本" in markdown_text(at)
+    # 行内「✕」两步确认删除概念 A，删除后列表自动刷新
+    at = at.button(key=f"xdel_{a}").click().run()
+    assert not at.exception
+    assert any("确认删除" in (btn.label or "") for btn in at.button)
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert database.get_concept(a) is None
+    assert database.get_concept(b) is not None
+    assert "机会成本" not in markdown_text(at)
+    assert "📖 学习中" in markdown_text(at)
