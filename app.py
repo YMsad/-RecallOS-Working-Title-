@@ -528,31 +528,32 @@ def render_history() -> None:
     if st.session_state.get("history_view_id") is None:
         st.session_state.history_view_id = concepts[0]["id"]
 
-    # ---- V0.2.3: 概念表格（概念名称 / 掌握度 / 操作，行内查看与两步删除）----
-    hd_l, hd_m, hd_a = st.columns([6, 3, 4])
-    with hd_l:
-        st.markdown("**概念名称**")
-    with hd_m:
-        st.markdown("**掌握度**")
-    with hd_a:
-        st.markdown("**操作**")
-
-    for c in concepts:
-        col_l, col_m, col_a = st.columns([6, 3, 4])
-        with col_l:
-            st.markdown(f"**{c['title']}**")
-        with col_m:
-            st.markdown(MASTERY_LABELS.get(c["mastery"], c["mastery"]))
-        with col_a:
-            bv, bx = st.columns(2)
-            with bv:
-                if st.button("查看", key=f"view_{c['id']}"):
-                    st.session_state.history_view_id = c["id"]
-                    st.rerun()
-            with bx:
-                if st.button("✕", key=f"xdel_{c['id']}"):
-                    st.session_state[f"confirm_x_{c['id']}"] = True
-                    st.rerun()
+    # ---- V0.2.3: 三个独立表格，按掌握度分组（概念名称 / 操作，行内查看与两步删除）----
+    for group_key in _MASTERY_ORDER:
+        group = [c for c in concepts if c["mastery"] == group_key]
+        if not group:
+            continue
+        st.markdown(f"### {MASTERY_LABELS[group_key]}")
+        with st.container(border=True):
+            hd_l, hd_a = st.columns([6, 4])
+            with hd_l:
+                st.markdown("**概念名称**")
+            with hd_a:
+                st.markdown("**操作**")
+            for c in group:
+                col_l, col_a = st.columns([6, 4])
+                with col_l:
+                    st.markdown(f"**{c['title']}**")
+                with col_a:
+                    bv, bx = st.columns(2)
+                    with bv:
+                        if st.button("查看", key=f"view_{c['id']}"):
+                            st.session_state.history_view_id = c["id"]
+                            st.rerun()
+                    with bx:
+                        if st.button("✕", key=f"xdel_{c['id']}"):
+                            st.session_state[f"confirm_x_{c['id']}"] = True
+                            st.rerun()
 
     pending_delete = next(
         (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
