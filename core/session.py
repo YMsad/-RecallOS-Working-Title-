@@ -8,7 +8,9 @@ Every AI call is scriptable through an injected :class:`DeepSeekClient`
 from __future__ import annotations
 
 import logging
-from typing import Any
+import warnings
+from functools import wraps
+from typing import Any, Callable
 
 from core.client import DeepSeekClient
 from core.database import (
@@ -22,21 +24,28 @@ from core.database import (
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 from core.review import add_to_review_queue
 from core.prompts import (
+    DEEPER_QUESTION_ORDER,
     CheckAnswerResult,
     ConnectionSuggestion,
     SummaryResult,
+    ValidateAnswerResult,
+    ValidationTask,
     angle_shift_prompt,
     build_messages,
     check_answer_prompt,
     connections_prompt,
+    deeper_question_prompt,
     explain_prompt,
     opening_question_prompt,
     question_prompt,
     reference_answer_prompt,
+    simplify_explanation_prompt,
     simplify_question_prompt,
     summary_prompt,
+    validate_answer_prompt,
     validate_response,
     validate_response_list,
+    validation_task_prompt,
     warmup_prompt,
 )
 
@@ -46,6 +55,26 @@ MAX_LAYER = 4
 QUESTION_TEMPERATURE = 0.7
 JUDGE_TEMPERATURE = 0.0
 OTHER_TEMPERATURE = 0.3
+VALIDATION_MAX_ATTEMPTS = 3
+
+
+def deprecated(message: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Mark a method/function as deprecated (V0.3.0 keeps old code intact and
+    only warns; the callers will be migrated in later steps)."""
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            warnings.warn(
+                message or f"{func.__name__} is deprecated",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class SessionError(Exception):
@@ -101,6 +130,20 @@ class LearningSession:
         self._current_question: str | None = None
         self.recommended_connections: list[ConnectionSuggestion] = []
         self.summary: SummaryResult | None = None
+
+        # V0.3.0 — 底层逻辑重构新增状态（旧的 phase/层推进逻辑保持不变，仍可用）
+        self.stage: str = "learning"
+        self.text_type: str | None = None
+        self.validation_task: str | None = None
+        self.validation_target: str | None = None
+        self.validation_attempts: int = 0
+        self.validation_passed: bool = False
+        self.needs_relearning: bool = False
+        self.deeper_questions: list[str] = []
+        self.current_deeper_index: int = 0
+        self._current_deeper_question: str | None = None
+        self.deeper_history: list[dict[str, str]] = []
+        self._last_explanation: str | None = None
 
     # ------------------------------------------------------------------ flow
 
@@ -272,6 +315,147 @@ class LearningSession:
         logger.info("Session finished for concept %s (mastery=%s)", self.title, mastery)
         return self.summary
 
+    # ----------------------------------------------------- V0.3.0 validation
+
+    def start_validation(self) -> str:
+        """Begin the validation stage: design one concrete validation task that
+        checks real understanding. Returns the task text.
+        """
+        cid = self._require_started()
+        prompt = validation_task_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            qa_history=self._format_history(),
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        task: ValidationTask = validate_response(reply, ValidationTask)
+        self.validation_task = task.task
+        self.validation_target = task.target
+        self.validation_attempts = 0
+        self.validation_passed = False
+        self.needs_relearning = False
+        self.stage = "validation"
+        logger.info("Validation started for concept %s (id=%s)", self.title, cid)
+        return self.validation_task
+
+    def submit_validation(self, answer: str) -> dict[str, Any]:
+        """Judge the validation-task answer. After 3 consecutive failures the
+        concept is marked as「需要重新学习」.
+        """
+        cid = self._require_started()
+        if self.stage != "validation" or self.validation_task is None:
+            raise SessionError("submit_validation can only be called during validation")
+        if self.validation_target is None:
+            raise SessionError("validation target is missing; call start_validation() first")
+
+        attempts_left = VALIDATION_MAX_ATTEMPTS - self.validation_attempts
+        prompt = validate_answer_prompt(
+            title=self.title,
+            task=self.validation_task,
+            target=self.validation_target,
+            answer=answer,
+            attempts_left=attempts_left,
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=JUDGE_TEMPERATURE)
+        result: ValidateAnswerResult = validate_response(reply, ValidateAnswerResult)
+
+        if result.is_correct:
+            self.validation_passed = True
+            self.validation_attempts = 0
+        else:
+            self.validation_attempts += 1
+            if self.validation_attempts >= VALIDATION_MAX_ATTEMPTS:
+                self.needs_relearning = True
+                self.stage = "relearn"
+                logger.info(
+                    "Validation failed %d times for concept %s (id=%s) -> needs relearning",
+                    VALIDATION_MAX_ATTEMPTS,
+                    self.title,
+                    cid,
+                )
+
+        return {
+            "passed": self.validation_passed,
+            "feedback": result.feedback,
+            "missing": result.missing,
+            "attempts_left": max(
+                0, VALIDATION_MAX_ATTEMPTS - self.validation_attempts
+            ),
+            "needs_relearning": self.needs_relearning,
+            "stage": self.stage,
+        }
+
+    def ask_simplify(self) -> str:
+        """Give a one-notch-simpler plain-language explanation of the concept.
+        Does not change the current stage.
+        """
+        cid = self._require_started()
+        prompt = simplify_explanation_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            explanation=self._last_explanation or "",
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        self._last_explanation = reply.strip()
+        logger.info("Simplified explanation given for concept %s (id=%s)", self.title, cid)
+        return self._last_explanation
+
+    # ------------------------------------------------------- V0.3.0 deepening
+
+    def next_deeper_question(self) -> str | None:
+        """Produce the next deeper-probing question (再验证 -> 联系 -> 反事实 ->
+        行动 -> 第一性原理), or None once all five have been asked.
+        """
+        cid = self._require_started()
+        if self.current_deeper_index >= len(DEEPER_QUESTION_ORDER):
+            self._current_deeper_question = None
+            return None
+
+        qtype = DEEPER_QUESTION_ORDER[self.current_deeper_index]
+        prompt = deeper_question_prompt(
+            title=self.title,
+            source_text=self.source_text,
+            question_type=qtype,
+            qa_history=self._format_history(),
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
+        question = reply.strip()
+        self.deeper_questions.append(question)
+        self._current_deeper_question = question
+        self.current_deeper_index += 1
+        logger.info(
+            "Deeper question %d/%d (%s) for concept %s (id=%s)",
+            self.current_deeper_index,
+            len(DEEPER_QUESTION_ORDER),
+            qtype,
+            self.title,
+            cid,
+        )
+        return question
+
+    def submit_deeper_answer(self, answer: str) -> dict[str, Any]:
+        """Record the learner's answer to the current deeper question. Deeper
+        questions are open-ended, so no pass/fail is judged here; the exchange
+        is kept in :attr:`deeper_history`.
+        """
+        cid = self._require_started()
+        if self._current_deeper_question is None:
+            raise SessionError(
+                "no deeper question on screen; call next_deeper_question() first"
+            )
+        self.deeper_history.append(
+            {
+                "question": self._current_deeper_question,
+                "answer": answer,
+            }
+        )
+        logger.info("Deeper answer recorded for concept %s (id=%s)", self.title, cid)
+        return {
+            "question": self._current_deeper_question,
+            "recorded": True,
+            "deeper_asked": self.current_deeper_index,
+        }
+
     # --------------------------------------------------------------- internals
 
     def _require_started(self) -> int:
@@ -290,6 +474,10 @@ class LearningSession:
         reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         return reply.strip()
 
+    @deprecated(
+        "LearningSession._generate_question is deprecated since V0.3.0; "
+        "use next_deeper_question() and the new flow instead"
+    )
     def _generate_question(self, layer: int) -> str:
         related = None
         if layer == 4:
@@ -311,6 +499,10 @@ class LearningSession:
         reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         return reply.strip()
 
+    @deprecated(
+        "LearningSession._route_model is deprecated since V0.3.0; "
+        "the V0.3.0 flow routes through DEEPER_QUESTION_ORDER instead"
+    )
     def _route_model(self, layer: int) -> str | None:
         """V0.2.1 — 思维模型自动路由：根据用户表现自动选择追问模型，不加选择负担。
         V0.2.3 — 增加趣味性：第 3 层（反事实）统一换用黄金圈，避免全程同一个模型。
@@ -400,4 +592,10 @@ class LearningSession:
         return "\n".join(lines)
 
 
-__all__ = ["LearningSession", "SessionError", "warmup_concept"]
+__all__ = [
+    "LearningSession",
+    "SessionError",
+    "warmup_concept",
+    "VALIDATION_MAX_ATTEMPTS",
+    "MAX_LAYER",
+]

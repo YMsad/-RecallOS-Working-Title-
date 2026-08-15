@@ -58,6 +58,17 @@ def summary_reply(breakthrough: str, hook: str) -> httpx.Response:
     )
 
 
+def validation_task_reply(task: str, target: str) -> httpx.Response:
+    return text_reply(
+        json.dumps({"task": task, "target": target}, ensure_ascii=False)
+    )
+
+
+def validate_reply(is_correct: bool, feedback: str, missing=None) -> httpx.Response:
+    body = {"is_correct": is_correct, "feedback": feedback, "missing": missing}
+    return text_reply(json.dumps(body, ensure_ascii=False))
+
+
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
     database.configure(tmp_path / "test.db")
@@ -442,3 +453,153 @@ def test_learning_complete_queues_review_without_finish() -> None:
     row = database.get_concept(session.concept_id)
     expected = (date.today() + timedelta(days=1)).isoformat()
     assert row["next_review_date"] == expected
+
+
+# ------------------------------------------------------- V0.3.0 validation stage
+
+
+def test_start_validation_designs_task_and_sets_stage() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        validation_task_reply("用一句话向朋友解释机会成本", "关键点：放弃的次优价值"),
+    )
+    session.start()
+    task_text = session.start_validation()
+    assert task_text == "用一句话向朋友解释机会成本"
+    assert session.validation_target == "关键点：放弃的次优价值"
+    assert session.stage == "validation"
+    assert session.validation_passed is False
+    assert session.needs_relearning is False
+    payload = transport.requests[1]["messages"][1]["content"]
+    assert "验证任务" in payload
+
+
+def test_validation_success_sets_passed() -> None:
+    session, _ = make_session(
+        text_reply("Q1"),
+        validation_task_reply("任务", "目标"),
+        validate_reply(True, "很好，你已经抓住了核心"),
+    )
+    session.start()
+    session.start_validation()
+    result = session.submit_validation("机会成本就是我必须放弃的那个次优选择")
+    assert result["passed"] is True
+    assert result["feedback"] == "很好，你已经抓住了核心"
+    assert result["missing"] is None
+    assert result["needs_relearning"] is False
+    assert session.validation_passed is True
+    assert session.validation_attempts == 0
+
+
+def test_validation_three_failures_marks_needs_relearning() -> None:
+    session, _ = make_session(
+        text_reply("Q1"),
+        validation_task_reply("任务", "目标"),
+        validate_reply(False, "再想想", "缺关键点1"),
+        validate_reply(False, "再想想", "缺关键点2"),
+        validate_reply(False, "最后提示", "还是缺关键点3"),
+    )
+    session.start()
+    session.start_validation()
+    r1 = session.submit_validation("回答1")
+    assert r1["passed"] is False
+    assert r1["attempts_left"] == 2
+    assert r1["needs_relearning"] is False
+
+    r2 = session.submit_validation("回答2")
+    assert r2["attempts_left"] == 1
+    assert r2["needs_relearning"] is False
+
+    r3 = session.submit_validation("回答3")
+    assert r3["needs_relearning"] is True
+    assert r3["stage"] == "relearn"
+    assert session.stage == "relearn"
+    assert session.needs_relearning is True
+
+
+def test_submit_validation_requires_validation_stage() -> None:
+    session, _ = make_session(text_reply("Q1"))
+    session.start()
+    with pytest.raises(SessionError):
+        session.submit_validation("x")
+
+
+def test_ask_simplify_returns_plain_text_and_keeps_stage() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        text_reply("更简单的大白话：机会成本就是你为了A而放弃的B"),
+    )
+    session.start()
+    session.stage = "validation"
+    simple = session.ask_simplify()
+    assert simple == "更简单的大白话：机会成本就是你为了A而放弃的B"
+    assert session.stage == "validation"
+    payload = transport.requests[1]["messages"][1]["content"]
+    assert "讲得不够简单" in payload
+
+
+# -------------------------------------------------------- V0.3.0 deeper questions
+
+
+def test_next_deeper_question_runs_full_sequence() -> None:
+    session, transport = make_session(
+        text_reply("Q1"),
+        text_reply("再验证问题"),
+        text_reply("联系问题"),
+        text_reply("反事实问题"),
+        text_reply("行动问题"),
+        text_reply("第一性原理问题"),
+    )
+    session.start()
+
+    questions = []
+    while True:
+        q = session.next_deeper_question()
+        if q is None:
+            break
+        questions.append(q)
+
+    assert questions == [
+        "再验证问题",
+        "联系问题",
+        "反事实问题",
+        "行动问题",
+        "第一性原理问题",
+    ]
+    assert session.current_deeper_index == 5
+    assert len(session.deeper_questions) == 5
+    assert session.next_deeper_question() is None
+
+    deeper_payloads = [
+        p["messages"][1]["content"]
+        for p in transport.requests
+        if "层深化" in p["messages"][1]["content"]
+    ]
+    assert len(deeper_payloads) == 5
+    assert "再验证层深化" in deeper_payloads[0]
+    assert "联系层深化" in deeper_payloads[1]
+    assert "反事实层深化" in deeper_payloads[2]
+    assert "行动层深化" in deeper_payloads[3]
+    assert "第一性原理层深化" in deeper_payloads[4]
+
+
+def test_submit_deeper_answer_records_exchange() -> None:
+    session, _ = make_session(
+        text_reply("Q1"),
+        text_reply("再验证问题"),
+    )
+    session.start()
+    q = session.next_deeper_question()
+    assert q == "再验证问题"
+    result = session.submit_deeper_answer("我觉得机会成本就是放弃的次优")
+    assert result["recorded"] is True
+    assert result["question"] == "再验证问题"
+    assert len(session.deeper_history) == 1
+    assert session.deeper_history[0]["answer"] == "我觉得机会成本就是放弃的次优"
+
+
+def test_submit_deeper_answer_requires_open_question() -> None:
+    session, _ = make_session(text_reply("Q1"))
+    session.start()
+    with pytest.raises(SessionError):
+        session.submit_deeper_answer("x")

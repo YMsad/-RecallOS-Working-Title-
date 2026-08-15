@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from core.models import NonEmptyStr, OptionalStr, RecallBaseModel
 
@@ -414,6 +414,199 @@ def explain_prompt(
 - 纯文本，不要输出 JSON"""
 
 
+# --------------------------------------------------------------- V0.3.0 flow
+# 底层逻辑重构新增的 prompt：文本类型识别、验证任务、验证判定、降维解释、
+# 深化追问。旧 prompt 全部保留；返回 JSON 的结构均由本模块的模型校验。
+
+_TEXT_TYPE_CHOICES = {
+    "concept": "一个独立的概念、术语（如「机会成本」）",
+    "definition": "一段对某个概念或事物的解释性说明",
+    "article": "一篇较长的文章、章节或资料",
+    "list": "一组并列的要点、步骤或清单",
+    "question": "一个问题、FAQ 或待解答的疑问",
+    "other": "其他类型的学习材料，尽量少用",
+}
+
+
+def detect_text_type_prompt(*, raw_text: str) -> str:
+    """Classify the pasted material before learning starts. Returns JSON
+    validated by :class:`TextTypeResult`.
+    """
+    choices_text = "\n".join(f"- {k}：{v}" for k, v in _TEXT_TYPE_CHOICES.items())
+    return f"""请先判断学习者粘贴的这段材料属于哪种类型，以便用合适的方式学习。
+
+粘贴的材料原文：
+{raw_text}
+
+类型可选值：
+{choices_text}
+
+要求：
+- 类型判断要贴近实际：独立术语/知识点选 concept；解释性段落选 definition；
+  较长或结构不强的选 article；并列要点选 list（这种通常可拆成多个概念）；
+  带问句的选 question；其余才选 other
+- title_hint：从材料中提取一个最适合当作概念标题的名词短语（1-8 个字），
+  提取不到就填空字符串
+- reason：用一句话说明为什么这么判断，不确定时也给一句简短说明
+
+只输出 JSON，格式：
+{{"text_type": "concept", "title_hint": "标题提示或空字符串", "reason": "一句话理由或null"}}"""
+
+
+def validation_task_prompt(
+    *,
+    title: str,
+    source_text: str,
+    qa_history: str = "",
+) -> str:
+    """Design one concrete validation task that checks real understanding rather
+    than memorisation. Returns JSON validated by :class:`ValidationTask`.
+    """
+    history_text = qa_history or "（暂无可用的追问记录）"
+    return f"""基本学习已经完成。请设计一个「验证任务」，检验学习者是真的搞懂了概念，而不是背下来了。
+
+学习的概念：{title}
+来源原文：
+{source_text}
+此前的追问记录：
+{history_text}
+
+要求：
+- 任务必须无法靠背答案蒙混：可以是「用一句话向完全没听过的人解释」（费曼）、
+  「判断某个例子里是否发生了这个现象并说明理由」、「预测某个场景的结果」等
+- 只给一个任务，不要拆成选择题，不要列出选项
+- target 写清楚「一个正确理解应包含的关键点」，供后续判断学习者的回答是否到位
+- 语气自然，像朋友递给他的一个小挑战
+
+只输出 JSON，格式：
+{{"task": "验证任务（具体、可执行）", "target": "正确理解应包含的关键点，1-2句"}}"""
+
+
+def validate_answer_prompt(
+    *,
+    title: str,
+    task: str,
+    target: str,
+    answer: str,
+    attempts_left: int | None = None,
+) -> str:
+    """Judge the learner's validation-task answer. Returns JSON validated by
+    :class:`ValidateAnswerResult`.
+    """
+    attempt_note = (
+        f"\n- 这是最后一次机会（还可重试 {attempts_left} 次），feedback 要更暖、更鼓励"
+        if attempts_left is not None and attempts_left <= 1
+        else ""
+    )
+    return f"""请判断学习者在「验证任务」中的回答是否体现了真正的理解。
+
+学习的概念：{title}
+验证任务：{task}
+正确理解应包含的关键点：{target}
+学习者的回答：{answer}
+
+判断规则：
+- 回答是否覆盖 target 里的关键点；方向对、能用学习者自己的话说得通道理即 is_correct 为 true
+- 不必逐字逐句，重点是「学习者自己的话说得出」
+- 答对时 feedback 表示欣赏与延伸，像朋友聊天
+- 答错或偏题时 feedback 温和指出差距，missing 用 1 句话点出少了哪个关键点
+- 整体语气温暖、不评判，减少考试感{attempt_note}
+
+只输出 JSON，格式：
+{{"is_correct": true或false, "feedback": "有对话感的反馈（1-2句）", "missing": "缺失的关键点或null"}}"""
+
+
+def simplify_explanation_prompt(
+    *,
+    title: str,
+    source_text: str,
+    explanation: str = "",
+) -> str:
+    """Rewrite the explanation (or the concept itself) one notch simpler, in the
+    most everyday language. Returns plain text.
+    """
+    prev = f"（学习者仍觉得不够简单，之前的解释是：\n{explanation}）" if explanation else ""
+    return f"""学习者表示「讲得不够简单」，请把概念解释再降一个台阶，用最生活化的大白话重新讲一遍。
+
+学习的概念：{title}
+来源原文片段：
+{source_text}
+{prev}
+
+要求：
+- 用比上次更简单的生活化语言，像给朋友解释一样
+- 先一句话说清核心意思，再用一个具体的日常例子（比如买奶茶、点外卖、开店算账）
+- 语气轻一点，可以自嘲式地承认「我之前可能说得有点绕」，降低压力
+- 结尾轻轻问一句「这样是不是顺多了？」，然后不要再提问
+- 纯文本，不要输出 JSON"""
+
+
+_DEEPER_QUESTION_GUIDES: dict[str, str] = {
+    "verification_plus": (
+        "用一个新的、他没见过的场景或反例再验证一次理解，"
+        "看他能不能在变通的场合认出这个概念，问题要具体。"
+    ),
+    "connection": (
+        "把他以前学过的相关概念拿出来，问一个「它和你之前学的 X 有什么联系或区别」"
+        "的问题，引导他把新知识连成网。"
+    ),
+    "counterfactual": (
+        "做反事实推演：假如没有这个概念（它不存在），会发生什么？"
+        "从反面引导他看清这个概念的价值。"
+    ),
+    "action": (
+        "把概念推进到一个具体的行动决策：「如果明天他要在真实生活里做一个相关的"
+        "决定，他会怎么用上它？」让概念落到真实的选择上。"
+    ),
+    "first_principles": (
+        "引导他把概念拆到不可再拆的基本事实，从最底层重新推导一遍，"
+        "撇开背下来的结论。"
+    ),
+}
+
+_DEEPER_QUESTION_NAMES = {
+    "verification_plus": "再验证",
+    "connection": "联系",
+    "counterfactual": "反事实",
+    "action": "行动",
+    "first_principles": "第一性原理",
+}
+
+DEEPER_QUESTION_ORDER: tuple[str, ...] = (
+    "verification_plus",
+    "connection",
+    "counterfactual",
+    "action",
+    "first_principles",
+)
+
+
+def deeper_question_prompt(
+    *,
+    title: str,
+    source_text: str,
+    question_type: str,
+    qa_history: str = "",
+) -> str:
+    """Build one deeper-probing question of the given type. Returns plain text."""
+    if question_type not in _DEEPER_QUESTION_GUIDES:
+        raise ValueError(
+            f"question_type must be one of {sorted(_DEEPER_QUESTION_GUIDES)}, "
+            f"got {question_type}"
+        )
+    parts = [
+        f"当前学习的概念：{title}",
+        f"来源原文片段：\n{source_text}",
+    ]
+    if qa_history:
+        parts.append(f"学习者此前的回答记录：\n{qa_history}")
+    parts.append(f"【{_DEEPER_QUESTION_NAMES[question_type]}层深化】{_DEEPER_QUESTION_GUIDES[question_type]}")
+    parts.append(
+        "要求：只输出这一个深化问题，具体、有画面感、略有挑战但不刁难，不要任何解释。"
+    )
+    return "\n\n".join(parts)
+
+
 # ------------------------------------------------------------------- messages
 
 def build_messages(user_content: str) -> list[dict[str, str]]:
@@ -481,6 +674,31 @@ class ConnectionSuggestion(RecallBaseModel):
     relation_text: NonEmptyStr
 
 
+class TextTypeResult(RecallBaseModel):
+    """Validated output of :func:`detect_text_type_prompt`."""
+
+    text_type: Literal[
+        "concept", "definition", "article", "list", "question", "other"
+    ]
+    title_hint: OptionalStr = None
+    reason: OptionalStr = None
+
+
+class ValidationTask(RecallBaseModel):
+    """Validated output of :func:`validation_task_prompt`."""
+
+    task: NonEmptyStr
+    target: NonEmptyStr
+
+
+class ValidateAnswerResult(RecallBaseModel):
+    """Validated output of :func:`validate_answer_prompt`."""
+
+    is_correct: bool
+    feedback: NonEmptyStr
+    missing: OptionalStr = None
+
+
 __all__ = [
     "SYSTEM_PROMPT",
     "question_prompt",
@@ -500,4 +718,13 @@ __all__ = [
     "CheckAnswerResult",
     "SummaryResult",
     "ConnectionSuggestion",
+    "TextTypeResult",
+    "ValidationTask",
+    "ValidateAnswerResult",
+    "detect_text_type_prompt",
+    "validation_task_prompt",
+    "validate_answer_prompt",
+    "simplify_explanation_prompt",
+    "deeper_question_prompt",
+    "DEEPER_QUESTION_ORDER",
 ]

@@ -6,18 +6,25 @@ import pytest
 from pydantic import ValidationError
 
 from core import (
+    DEEPER_QUESTION_ORDER,
     SYSTEM_PROMPT,
     CheckAnswerResult,
     ConnectionSuggestion,
     SummaryResult,
+    TextTypeResult,
     build_messages,
     check_answer_prompt,
     connections_prompt,
+    deeper_question_prompt,
+    detect_text_type_prompt,
     parse_json_response,
     question_prompt,
+    simplify_explanation_prompt,
     summary_prompt,
+    validate_answer_prompt,
     validate_response,
     validate_response_list,
+    validation_task_prompt,
     warmup_prompt,
 )
 
@@ -200,3 +207,94 @@ def test_summary_result_model() -> None:
         tomorrow_hook="边际效用和机会成本有什么关系？",
     )
     assert result.tomorrow_hook.startswith("边际效用")
+
+
+# --------------------------------------------------------- V0.3.0 new prompts
+
+
+def test_detect_text_type_prompt_requests_json() -> None:
+    prompt = detect_text_type_prompt(raw_text="机会成本是指在决策中放弃的次优选择")
+    assert "粘贴的材料原文" in prompt
+    assert "text_type" in prompt
+    assert "title_hint" in prompt
+    assert '"reason"' in prompt
+
+
+def test_detect_text_type_result_validates() -> None:
+    result = validate_response(
+        '{"text_type": "concept", "title_hint": "机会成本", "reason": null}',
+        TextTypeResult,
+    )
+    assert result.text_type == "concept"
+    assert result.title_hint == "机会成本"
+    assert result.reason is None
+
+
+def test_validation_task_prompt_requests_json() -> None:
+    prompt = validation_task_prompt(title="机会成本", source_text="S", qa_history="H")
+    assert "验证任务" in prompt
+    assert "追问记录" in prompt
+    assert '"task"' in prompt
+    assert '"target"' in prompt
+
+
+def test_validate_answer_prompt_requests_json() -> None:
+    prompt = validate_answer_prompt(
+        title="机会成本", task="用一句话解释", target="关键点", answer="回答"
+    )
+    assert "验证任务" in prompt
+    assert "is_correct" in prompt
+    assert '"missing"' in prompt
+
+
+def test_simplify_explanation_prompt_is_plain_text() -> None:
+    prompt = simplify_explanation_prompt(
+        title="机会成本", source_text="S", explanation="旧解释有点绕"
+    )
+    assert "更简单" in prompt or "降一个台阶" in prompt
+    assert "旧解释有点绕" in prompt
+    assert '{"' not in prompt
+
+
+@pytest.mark.parametrize(
+    ("qtype", "marker"),
+    [
+        ("verification_plus", "再验证"),
+        ("connection", "联系"),
+        ("counterfactual", "反事实"),
+        ("action", "行动"),
+        ("first_principles", "第一性原理"),
+    ],
+)
+def test_deeper_question_prompt_all_types(qtype: str, marker: str) -> None:
+    prompt = deeper_question_prompt(
+        title="机会成本", source_text="S", question_type=qtype
+    )
+    assert marker in prompt
+    assert "深化" in prompt
+    assert '{"' not in prompt
+
+
+def test_deeper_question_prompt_includes_qa_history_when_given() -> None:
+    prompt = deeper_question_prompt(
+        title="机会成本",
+        source_text="S",
+        question_type="connection",
+        qa_history="回答记录",
+    )
+    assert "回答记录" in prompt
+
+
+def test_deeper_question_prompt_invalid_type_rejected() -> None:
+    with pytest.raises(ValueError):
+        deeper_question_prompt(title="X", source_text="Y", question_type="nope")
+
+
+def test_deeper_question_order_matches_spec() -> None:
+    assert DEEPER_QUESTION_ORDER == (
+        "verification_plus",
+        "connection",
+        "counterfactual",
+        "action",
+        "first_principles",
+    )
