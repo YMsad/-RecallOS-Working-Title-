@@ -13,7 +13,7 @@ import warnings
 from functools import wraps
 from typing import Any, Callable
 
-from core.client import DeepSeekClient
+from core.client import DeepSeekClient, DeepSeekError
 from core.database import (
     get_all_concepts,
     get_concept,
@@ -351,7 +351,7 @@ class LearningSession:
             source_text=self.source_text,
             qa_history=self._format_history(),
         )
-        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "设计验证任务")
         task: ValidationTask = validate_response(reply, ValidationTask)
         self.validation_task = task.task
         self.validation_target = task.target
@@ -374,14 +374,17 @@ class LearningSession:
             raise SessionError("validation target is missing; call start_validation() first")
 
         attempts_left = VALIDATION_MAX_ATTEMPTS - self.validation_attempts
-        prompt = validate_answer_prompt(
-            title=self.title,
-            task=self.validation_task,
-            target=self.validation_target,
-            answer=answer,
-            attempts_left=attempts_left,
+        reply = self._chat_or_raise(
+            validate_answer_prompt(
+                title=self.title,
+                task=self.validation_task,
+                target=self.validation_target,
+                answer=answer,
+                attempts_left=attempts_left,
+            ),
+            JUDGE_TEMPERATURE,
+            "判断验证作答",
         )
-        reply = self.client.chat(build_messages(prompt), temperature=JUDGE_TEMPERATURE)
         result: ValidateAnswerResult = validate_response(reply, ValidateAnswerResult)
 
         if result.is_correct:
@@ -427,12 +430,15 @@ class LearningSession:
         Does not change the current stage.
         """
         cid = self._require_started()
-        prompt = simplify_explanation_prompt(
-            title=self.title,
-            source_text=self.source_text,
-            explanation=self._last_explanation or "",
+        reply = self._chat_or_raise(
+            simplify_explanation_prompt(
+                title=self.title,
+                source_text=self.source_text,
+                explanation=self._last_explanation or "",
+            ),
+            OTHER_TEMPERATURE,
+            "大白话解释",
         )
-        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
         self._last_explanation = reply.strip()
         logger.info("Simplified explanation given for concept %s (id=%s)", self.title, cid)
         return self._last_explanation
@@ -454,13 +460,16 @@ class LearningSession:
             return None
 
         qtype = DEEPER_QUESTION_ORDER[self.current_deeper_index]
-        prompt = deeper_question_prompt(
-            title=self.title,
-            source_text=self.source_text,
-            question_type=qtype,
-            qa_history=self._format_history(),
+        reply = self._chat_or_raise(
+            deeper_question_prompt(
+                title=self.title,
+                source_text=self.source_text,
+                question_type=qtype,
+                qa_history=self._format_history(),
+            ),
+            QUESTION_TEMPERATURE,
+            "生成深化追问",
         )
-        reply = self.client.chat(build_messages(prompt), temperature=QUESTION_TEMPERATURE)
         question = reply.strip()
         self.deeper_questions.append(question)
         self._current_deeper_question = question
@@ -499,6 +508,73 @@ class LearningSession:
             "recorded": True,
             "deeper_asked": self.current_deeper_index,
         }
+
+    def force_validation_pass(self) -> None:
+        """V0.3.0 — AI 判断不可用时，用户可手动「跳过」验证并进入深化阶段。
+
+        仅用于临时放行：把本轮验证视为通过，进入 deepening，不等待 AI。
+        """
+        cid = self._require_started()
+        if self.stage != "validation":
+            raise SessionError(
+                "force_validation_pass can only be called during validation"
+            )
+        self.validation_passed = True
+        self.validation_attempts = 0
+        self.stage = "deepening"
+        self.validation_history.append(
+            {
+                "answer": "(由用户选择跳过，未经过 AI 判断)",
+                "passed": True,
+                "feedback": "用户手动跳过（AI 不可用）",
+                "missing": "",
+            }
+        )
+        self._persist_new_flow()
+        logger.info(
+            "Validation manually skipped (pass) for concept %s (id=%s)", self.title, cid
+        )
+
+    def finish_deepening(self) -> None:
+        """V0.3.0 — 提前结束深化阶段（AI 无法继续生成问题时，用户手动跳过）。
+
+        效果与自然问完 5 问一致：mark 为 complete/connections 并入复习队列。
+        """
+        cid = self._require_started()
+        self._current_deeper_question = None
+        self.current_deeper_index = len(DEEPER_QUESTION_ORDER)
+        self.stage = "complete"
+        self.phase = "connections"
+        self._persist_new_flow()
+        add_to_review_queue(cid)
+        logger.info("Deepening manually finished early for concept %s (id=%s)", self.title, cid)
+
+    def _chat_or_raise(self, prompt: str, temperature: float, what: str) -> str:
+        """Send one AI request with explicit logging around the call.
+
+        Failures are logged with context then re-raised as ``DeepSeekError`` so
+        the UI layer can show a retry-able error prompt instead of hanging.
+        """
+        cid = self._require_started()
+        snippet = " ".join(prompt.split())[:60]
+        logger.info(
+            "AI 调用开始[%s]: concept=%s id=%s 提问=%r", what, self.title, cid, snippet
+        )
+        try:
+            reply = self.client.chat(build_messages(prompt), temperature=temperature)
+        except DeepSeekError as exc:
+            logger.error(
+                "AI 调用失败[%s]: concept=%s id=%s —— %s", what, self.title, cid, exc
+            )
+            raise
+        logger.info(
+            "AI 调用完成[%s]: concept=%s id=%s 回复长度=%d",
+            what,
+            self.title,
+            cid,
+            len(reply),
+        )
+        return reply
 
     # --------------------------------------------------------------- internals
 

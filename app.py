@@ -153,6 +153,9 @@ def _resume_learning(concept: dict) -> None:
         )
     st.session_state.session = session
     st.session_state.messages = messages
+    # 清理旧的 AI 错误/重试状态，避免恢复会话时卡在重试界面
+    st.session_state.pop("v_pending_answer", None)
+    st.session_state.pop("v_ai_error", None)
     st.session_state.step = "learning"
     st.rerun()
 
@@ -237,6 +240,9 @@ def render_home() -> None:
                     {"role": "assistant",
                      "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了，开始验证」。"})
                 st.session_state.messages = messages
+                # 清理上一轮遗留的 AI 错误/重试状态
+                st.session_state.pop("v_pending_answer", None)
+                st.session_state.pop("v_ai_error", None)
                 st.session_state.step = "learning"
                 st.rerun()
             except DeepSeekAuthError:
@@ -402,6 +408,51 @@ def _render_learning_new(session: LearningSession) -> None:
                 st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
             st.rerun()
 
+        pending = st.session_state.get("v_pending_answer")
+        if pending is not None:
+            # 上次 AI 判断失败：展示错误，让用户主动选「重试」或「跳过」，不再自动转圈
+            st.error("AI 判断失败：暂时连不上 DeepSeek。请重试，或先跳过本轮验证。")
+            render_messages()
+            c_retry, c_skip = st.columns(2)
+            with c_retry:
+                if st.button("🔄 重试判断", key="v_retry_judge"):
+                    try:
+                        with st.spinner("AI 正在判断…"):
+                            result = session.submit_validation(pending)
+                        if result["passed"]:
+                            reply = f"✅ {result['feedback']}"
+                        else:
+                            reply = f"🤔 {result['feedback']}"
+                            if result.get("missing"):
+                                reply += f"\n\n💡 还差一点点：{result['missing']}"
+                            if result.get("needs_relearning"):
+                                reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
+                    except DeepSeekAuthError:
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+                        st.rerun()
+                    except (DeepSeekError, SessionError) as exc:
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": f"❌ {exc}"})
+                        st.rerun()
+                    st.session_state.pop("v_pending_answer", None)
+                    st.session_state.messages.append({"role": "assistant", "text": reply})
+                    st.rerun()
+            with c_skip:
+                if st.button("⏭ 跳过判断，视为通过", key="v_skip_judge"):
+                    try:
+                        session.force_validation_pass()
+                    except SessionError as exc:
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": f"❌ {exc}"})
+                    else:
+                        st.session_state.messages.append(
+                            {"role": "assistant",
+                             "text": "⏭ 已跳过本轮验证，进入深化追问。"})
+                    st.session_state.pop("v_pending_answer", None)
+                    st.rerun()
+            return
+
         answer = st.chat_input("你的回答…")
         if answer:
             st.session_state.messages.append({"role": "user", "text": answer})
@@ -421,6 +472,8 @@ def _render_learning_new(session: LearningSession) -> None:
                 st.session_state.messages.append(
                     {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
             except (DeepSeekError, SessionError) as exc:
+                # 超时/网络失败：缓存住答案，展示「重试/跳过」，不让用户干等
+                st.session_state["v_pending_answer"] = answer
                 st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
             st.rerun()
         render_messages()
@@ -428,20 +481,44 @@ def _render_learning_new(session: LearningSession) -> None:
 
     if stage == "deepening":
         question = st.session_state.get("v_deeper_question")
+        # AI 生成失败后不再自动重试（避免每次 rerun 都转圈），改由用户手动「重试/跳过」
+        if question is None and st.session_state.get("v_ai_error"):
+            st.error(f"AI 生成问题失败：{st.session_state['v_ai_error']}")
+            render_messages()
+            c_retry, c_skip = st.columns(2)
+            with c_retry:
+                if st.button("🔄 重试", key="v_retry_deeper"):
+                    st.session_state.pop("v_ai_error", None)
+                    st.rerun()
+            with c_skip:
+                if st.button("⏭ 跳过深化，进入总结", key="v_skip_deeper"):
+                    session.finish_deepening()
+                    st.session_state.pop("v_ai_error", None)
+                    st.session_state.pop("v_deeper_question", None)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": "⏭ 已跳过剩余的深化追问。"})
+                    st.rerun()
+            return
+
         if question is None:
             try:
                 with st.spinner("AI 正在出下一道更难的问题…"):
                     question = session.next_deeper_question()
             except DeepSeekAuthError:
+                st.session_state["v_ai_error"] = "Key 无效，请重新输入"
                 st.session_state.messages.append(
                     {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
                 render_messages()
+                st.rerun()
                 return
             except (DeepSeekError, SessionError) as exc:
+                st.session_state["v_ai_error"] = str(exc)
                 st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
                 render_messages()
+                st.rerun()
                 return
             if question:
+                st.session_state.pop("v_ai_error", None)
                 total = len(DEEPER_QUESTION_ORDER)
                 st.session_state.messages.append(
                     {"role": "assistant",

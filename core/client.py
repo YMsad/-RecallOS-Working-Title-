@@ -89,6 +89,13 @@ class DeepSeekClient:
             timeout=httpx.Timeout(self.settings.request_timeout),
             transport=transport,
         )
+        logger.info(
+            "DeepSeekClient ready: base=%s model=%s timeout=%.0fs max_retries=%d",
+            self.settings.deepseek_base_url,
+            self.settings.deepseek_model,
+            self.settings.request_timeout,
+            self.settings.max_retries,
+        )
         self.usage_records: list[dict[str, Any]] = []
         self.total_usage: dict[str, int] = {}
         self.request_count = 0
@@ -147,6 +154,14 @@ class DeepSeekClient:
 
         last_error: DeepSeekError | None = None
         for attempt in range(1, self.settings.max_retries + 1):
+            logger.info(
+                "AI 请求: model=%s messages=%d max_tokens=%s（第 %d/%d 次）",
+                payload["model"],
+                len(messages),
+                max_tokens,
+                attempt,
+                self.settings.max_retries,
+            )
             try:
                 body = self._post("/chat/completions", payload)
                 self.request_count += 1
@@ -218,8 +233,12 @@ class DeepSeekClient:
         try:
             response = self._client.post(path, json=payload)
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "DeepSeek 请求超时（超过 %.0fs）: %s", self.settings.request_timeout, exc
+            )
             raise DeepSeekNetworkError(f"Request timed out: {exc}") from exc
         except httpx.TransportError as exc:
+            logger.warning("DeepSeek 网络错误: %s", exc)
             raise DeepSeekNetworkError(f"Network error: {exc}") from exc
 
         status = response.status_code

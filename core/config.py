@@ -77,7 +77,9 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
 
     # HTTP behaviour
-    request_timeout: float = 60.0
+    # 30 秒超时：连接/读取/写入任一阶段超时都会抛 DeepSeekNetworkError（不再死等）。
+    # 可通过环境变量 REQUEST_TIMEOUT 覆盖。
+    request_timeout: float = 30.0
     max_retries: int = 3
     retry_backoff: float = 1.0
     retry_jitter: float = 0.5

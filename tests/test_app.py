@@ -8,6 +8,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from core import database
+from core.client import DeepSeekNetworkError
 
 APP = "app.py"
 
@@ -81,6 +82,29 @@ class FakeClient:
             self.depth += 1
             return f"深化问题{self.depth}"
         raise AssertionError(f"unexpected prompt: {user[:40]}")
+
+
+class FlakyClient(FakeClient):
+    """FakeClient that can simulate AI timeout/network failures on demand."""
+
+    def __init__(self, questions, *, fail_judge: int = 0, fail_deeper: int = 0) -> None:
+        super().__init__(questions)
+        self.fail_judge = fail_judge
+        self.fail_deeper = fail_deeper
+        self._judge_calls = 0
+        self._deeper_calls = 0
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "是否体现了真正的理解" in user:
+            self._judge_calls += 1
+            if self._judge_calls <= self.fail_judge:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        if "层深化" in user:
+            self._deeper_calls += 1
+            if self._deeper_calls <= self.fail_deeper:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        return super().chat(messages, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -722,6 +746,50 @@ def test_app_new_flow_complete_goes_to_connections(monkeypatch, configured_app) 
     assert not at.exception
     assert current_step(at) == "connections"
     assert "发现一些知识连接" in markdown_text(at)
+
+
+def test_app_validation_timeout_retry_recovers(monkeypatch, configured_app) -> None:
+    """验证判断 AI 超时：不自动转圈，展示「重试判断 / 跳过」，重试成功即恢复。"""
+    fake = FlakyClient([{"question": "Q", "correct": True, "feedback": "通过"}], fail_judge=1)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    # 失败后缓存住答案，改由用户手动继续
+    assert at.session_state["v_pending_answer"] == "机会成本就是放弃的次优选择"
+    assert any("重试判断" in (b.label or "") for b in at.button)
+    assert any("跳过判断" in (b.label or "") for b in at.button)
+    # 点「重试判断」→ 第二次调用成功 → 进入深化阶段
+    at = click_by_label(at, "重试判断")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "deepening"
+    assert "v_pending_answer" not in at.session_state
+
+
+def test_app_deepening_timeout_skip_to_complete(monkeypatch, configured_app) -> None:
+    """深化问题生成 AI 超时：展示「重试/跳过」，跳过即可手动进入总结。"""
+    fake = FlakyClient([{"question": "Q", "correct": True, "feedback": "通过"}], fail_deeper=1)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过 → 深化
+    assert not at.exception
+    assert at.session_state["session"].stage == "deepening"
+    # 生成问题失败：记录错误但不自动重试，展示重试/跳过
+    assert at.session_state["v_ai_error"]
+    assert any(b.label or "" for b in at.button if "重试" in b.label)
+    assert any("跳过深化" in (b.label or "") for b in at.button)
+    # 点「跳过深化，进入总结」→ 手动完成深化
+    at = click_by_label(at, "跳过深化，进入总结")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert "v_ai_error" not in at.session_state
 
 
 # ----------------------------------------------------- V0.3.0 session resume
