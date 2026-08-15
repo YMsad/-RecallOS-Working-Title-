@@ -562,6 +562,29 @@ def test_app_history_view_and_delete_buttons_via_callback(configured_app) -> Non
     assert "沉没成本" in markdown_text(at)
 
 
+def test_app_delete_from_detail_page_returns_to_history(configured_app) -> None:
+    """详情页顶部辅助删除：两步确认后回到历史页，被删概念已清除。"""
+    cid_a = database.save_concept("机会成本", "原文A")
+    cid_b = database.save_concept("沉没成本", "原文B")
+    database.save_connection(cid_a, cid_b, "都关于选择")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    at = click_by_label(at, "去往")
+    assert not at.exception
+    assert current_step(at) == "concept_detail"
+    shown = at.session_state["concept_detail_id"]
+    # 详情页顶部有辅助删除入口，两步式确认
+    assert any("删除这个概念" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "删除这个概念")
+    assert not at.exception
+    assert any("确认删除" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert database.get_concept(shown) is None
+
+
 # ---------------------------------------------------------------- V0.3.0 UI
 
 

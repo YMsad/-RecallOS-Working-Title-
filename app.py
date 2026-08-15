@@ -785,6 +785,34 @@ def render_concept_detail() -> None:
         return
 
     st.markdown(f"## 📄 {concept['title']}")
+    # 详情页辅助入口：顶部保留删除按钮，两步式确认与历史页一致
+    st.button(
+        "🗑 删除这个概念",
+        key=f"detail_del_{concept['id']}",
+        on_click=_request_delete_concept,
+        args=(concept["id"],),
+    )
+    if st.session_state.get(f"confirm_x_{concept['id']}"):
+        st.warning(
+            f"确定删除「{concept['title']}」吗？"
+            "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
+        )
+        c_ok, c_no = st.columns(2)
+        with c_ok:
+            st.button(
+                "确认删除",
+                type="primary",
+                key=f"confirm_ok_{concept['id']}",
+                on_click=_confirm_delete_concept,
+                args=(concept["id"],),
+            )
+        with c_no:
+            st.button(
+                "取消",
+                key=f"confirm_no_{concept['id']}",
+                on_click=_cancel_delete_concept,
+                args=(concept["id"],),
+            )
     st.markdown(format_detail(concept))
 
     st.markdown("### 🔗 连接跳转")
@@ -848,6 +876,10 @@ def _confirm_delete_concept(cid: int) -> None:
     st.session_state.pop(f"confirm_x_{cid}", None)
     if st.session_state.get("history_view_id") == cid:
         st.session_state.history_view_id = None
+    if st.session_state.get("step") == "concept_detail":
+        # 详情页删除后回到历史页（回调内不能调用 st.rerun，靠回调后自动 rerun）
+        st.session_state.pop("concept_detail_id", None)
+        st.session_state.step = "history"
 
 
 def render_history() -> None:
@@ -896,33 +928,31 @@ def render_history() -> None:
                             on_click=_request_delete_concept,
                             args=(c["id"],),
                         )
+                # 行内两步确认：对话框紧跟被点行，避免跳到页面底部造成交互断层
+                if st.session_state.get(f"confirm_x_{c['id']}"):
+                    st.warning(
+                        f"确定删除「{c['title']}」吗？"
+                        "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
+                    )
+                    c_ok, c_no = st.columns(2)
+                    with c_ok:
+                        st.button(
+                            "确认删除",
+                            type="primary",
+                            key=f"confirm_ok_{c['id']}",
+                            on_click=_confirm_delete_concept,
+                            args=(c["id"],),
+                        )
+                    with c_no:
+                        st.button(
+                            "取消",
+                            key=f"confirm_no_{c['id']}",
+                            on_click=_cancel_delete_concept,
+                            args=(c["id"],),
+                        )
                 if i < len(group) - 1:
                     st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
 
-    pending_delete = next(
-        (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
-    )
-    if pending_delete is not None:
-        st.warning(
-            f"确定删除「{pending_delete['title']}」吗？"
-            "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
-        )
-        col_ok, col_no = st.columns(2)
-        with col_ok:
-            st.button(
-                "确认删除",
-                type="primary",
-                key=f"confirm_ok_{pending_delete['id']}",
-                on_click=_confirm_delete_concept,
-                args=(pending_delete["id"],),
-            )
-        with col_no:
-            st.button(
-                "取消",
-                key=f"confirm_no_{pending_delete['id']}",
-                on_click=_cancel_delete_concept,
-                args=(pending_delete["id"],),
-            )
     st.divider()
 
     concept = next(
