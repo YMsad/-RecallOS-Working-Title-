@@ -6,6 +6,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import pandas as pd
@@ -45,6 +46,8 @@ from core.database import (
 from core.models import MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 from core.session import MAX_LAYER, restore_session
 
+logger = logging.getLogger(__name__)
+
 MASTERY_LABELS = {
     MASTERY_UNDERSTOOD: "✅ 搞懂了",
     MASTERY_UNCLEAR: "🔄 模糊",
@@ -76,6 +79,10 @@ def reset_to_home() -> None:
     st.session_state.pop("review_messages", None)
     st.session_state.pop("review_finished", None)
     st.session_state.pop("concept_detail_id", None)
+    st.session_state.pop("pending_action", None)
+    st.session_state.pop("v_pending_answer", None)
+    st.session_state.pop("v_ai_error", None)
+    st.session_state.pop("v_deeper_question", None)
     st.session_state.step = "home"
 
 
@@ -241,6 +248,7 @@ def render_home() -> None:
                      "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了，开始验证」。"})
                 st.session_state.messages = messages
                 # 清理上一轮遗留的 AI 错误/重试状态
+                st.session_state.pop("pending_action", None)
                 st.session_state.pop("v_pending_answer", None)
                 st.session_state.pop("v_ai_error", None)
                 st.session_state.step = "learning"
@@ -363,8 +371,74 @@ def _render_learning_old(session: LearningSession) -> None:
         render_connections()
 
 
+# V0.3.0 — AI 调用统一从「按钮回调」挪到 render 分支执行：
+# 按钮只负责设置 pending_action + st.rerun()；render 开头查到待办就执行对应 AI 调用。
+# 这样即使调用内部抛出任何未预期异常，也会被兜底转成可重试的气泡提示，
+# 不会让页面在转圈中卡死（CLI 正常、Web 点「开始」转圈的问题由此规避）。
+_PENDING_SPINNERS = {
+    "start_validation": "AI 正在设计验证任务…",
+    "start_validation_again": "AI 正在设计验证任务…",
+    "ask_simplify": "生成大白话解释…",
+    "submit_validation": "AI 正在判断…",
+}
+
+
+def _run_pending(session: LearningSession) -> None:
+    """执行按钮触发的、需要 AI 的待办动作（参数已放进 session_state）。"""
+    action = st.session_state.get("pending_action")
+    if not action:
+        return
+    try:
+        with st.spinner(_PENDING_SPINNERS[action]):
+            if action in ("start_validation", "start_validation_again"):
+                task_text = session.start_validation()
+                prefix = "新一轮验证" if action == "start_validation_again" else "验证你的理解"
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"📝 {prefix}：\n\n{task_text}"})
+            elif action == "ask_simplify":
+                explanation = session.ask_simplify()
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"💡 大白话：\n\n{explanation}"})
+            elif action == "submit_validation":
+                answer = st.session_state.get("v_pending_answer")
+                if not answer:
+                    raise SessionError("缺少待判断的答案")
+                result = session.submit_validation(answer)
+                if result["passed"]:
+                    reply = f"✅ {result['feedback']}"
+                else:
+                    reply = f"🤔 {result['feedback']}"
+                    if result.get("missing"):
+                        reply += f"\n\n💡 还差一点点：{result['missing']}"
+                    if result.get("needs_relearning"):
+                        reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
+                st.session_state.pop("v_pending_answer", None)
+                st.session_state.messages.append({"role": "assistant", "text": reply})
+        st.session_state.pop("pending_action", None)
+    except DeepSeekAuthError:
+        st.session_state.pop("pending_action", None)
+        st.session_state.pop("v_pending_answer", None)
+        st.session_state.messages.append({"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+    except (DeepSeekError, SessionError) as exc:
+        st.session_state.pop("pending_action", None)
+        if action == "submit_validation":
+            # 超时/网络失败：缓存住答案，展示「重试/跳过」，不让用户干等
+            st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+        else:
+            st.session_state.messages.append(
+                {"role": "assistant", "text": f"❌ {exc}\n\n再点一次即可重试。"})
+    except Exception as exc:  # noqa: BLE001 —— 兜底：任何异常都转成可重试提示，杜绝转圈卡死
+        logger.exception("_run_pending[%s] 意外失败", action)
+        st.session_state.pop("pending_action", None)
+        st.session_state.pop("v_pending_answer", None)
+        st.session_state.messages.append(
+            {"role": "assistant", "text": f"❌ 出错了：{exc}，请再试一次。"})
+
+
 def _render_learning_new(session: LearningSession) -> None:
     # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深化追问 → 完成
+    # 先执行按钮触发的 AI 待办，再按最新阶段渲染（不在按钮回调里直接调 AI）
+    _run_pending(session)
     stage = session.stage
 
     if stage == "reading":
@@ -374,18 +448,7 @@ def _render_learning_new(session: LearningSession) -> None:
         else:
             st.info("没有粘贴原文，直接开始验证也可以。")
         if st.button("我读完了，开始验证", key="v_read_done"):
-            try:
-                with st.spinner("AI 正在设计验证任务…"):
-                    task_text = session.start_validation()
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"📝 验证你的理解：\n\n{task_text}"})
-            except DeepSeekAuthError:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            except (DeepSeekError, SessionError) as exc:
-                st.session_state.messages.append(
-                    {"role": "assistant",
-                     "text": f"❌ {exc}\n\n再点一次下方「我读完了，开始验证」即可重试。"})
+            st.session_state["pending_action"] = "start_validation"
             st.rerun()
         render_messages()
         return
@@ -398,16 +461,7 @@ def _render_learning_new(session: LearningSession) -> None:
             st.markdown(session.validation_task)
 
         if st.button("😵 我看不懂，帮我解释", key="v_explain_btn"):
-            try:
-                with st.spinner("生成大白话解释…"):
-                    explanation = session.ask_simplify()
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"💡 大白话：\n\n{explanation}"})
-            except DeepSeekAuthError:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            except (DeepSeekError, SessionError) as exc:
-                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.session_state["pending_action"] = "ask_simplify"
             st.rerun()
 
         pending = st.session_state.get("v_pending_answer")
@@ -418,27 +472,7 @@ def _render_learning_new(session: LearningSession) -> None:
             c_retry, c_skip = st.columns(2)
             with c_retry:
                 if st.button("🔄 重试判断", key="v_retry_judge"):
-                    try:
-                        with st.spinner("AI 正在判断…"):
-                            result = session.submit_validation(pending)
-                        if result["passed"]:
-                            reply = f"✅ {result['feedback']}"
-                        else:
-                            reply = f"🤔 {result['feedback']}"
-                            if result.get("missing"):
-                                reply += f"\n\n💡 还差一点点：{result['missing']}"
-                            if result.get("needs_relearning"):
-                                reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
-                    except DeepSeekAuthError:
-                        st.session_state.messages.append(
-                            {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-                        st.rerun()
-                    except (DeepSeekError, SessionError) as exc:
-                        st.session_state.messages.append(
-                            {"role": "assistant", "text": f"❌ {exc}"})
-                        st.rerun()
-                    st.session_state.pop("v_pending_answer", None)
-                    st.session_state.messages.append({"role": "assistant", "text": reply})
+                    st.session_state["pending_action"] = "submit_validation"
                     st.rerun()
             with c_skip:
                 if st.button("⏭ 跳过判断，视为通过", key="v_skip_judge"):
@@ -458,25 +492,8 @@ def _render_learning_new(session: LearningSession) -> None:
         answer = st.chat_input("你的回答…")
         if answer:
             st.session_state.messages.append({"role": "user", "text": answer})
-            try:
-                with st.spinner("AI 正在判断…"):
-                    result = session.submit_validation(answer)
-                if result["passed"]:
-                    reply = f"✅ {result['feedback']}"
-                else:
-                    reply = f"🤔 {result['feedback']}"
-                    if result.get("missing"):
-                        reply += f"\n\n💡 还差一点点：{result['missing']}"
-                    if result.get("needs_relearning"):
-                        reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
-                st.session_state.messages.append({"role": "assistant", "text": reply})
-            except DeepSeekAuthError:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            except (DeepSeekError, SessionError) as exc:
-                # 超时/网络失败：缓存住答案，展示「重试/跳过」，不让用户干等
-                st.session_state["v_pending_answer"] = answer
-                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.session_state["v_pending_answer"] = answer
+            st.session_state["pending_action"] = "submit_validation"
             st.rerun()
         render_messages()
         return
@@ -516,6 +533,13 @@ def _render_learning_new(session: LearningSession) -> None:
             except (DeepSeekError, SessionError) as exc:
                 st.session_state["v_ai_error"] = str(exc)
                 st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+                render_messages()
+                st.rerun()
+                return
+            except Exception as exc:  # noqa: BLE001 —— 兜底：不中断页面，转为可重试
+                logger.exception("深化提问生成意外失败")
+                st.session_state["v_ai_error"] = str(exc)
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ 出错了：{exc}"})
                 render_messages()
                 st.rerun()
                 return
@@ -565,16 +589,7 @@ def _render_learning_new(session: LearningSession) -> None:
     if stage == "relearn":
         st.error("连续 3 次没有通过验证，这个知识点建议回看原文后重新学习。")
         if st.button("重新读一遍，再试一次", key="v_retry"):
-            try:
-                with st.spinner("AI 正在重新设计验证任务…"):
-                    task_text = session.start_validation()
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"📝 新一轮验证：\n\n{task_text}"})
-            except DeepSeekAuthError:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            except (DeepSeekError, SessionError) as exc:
-                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.session_state["pending_action"] = "start_validation_again"
             st.rerun()
         render_messages()
         return
