@@ -540,7 +540,7 @@ def render_history() -> None:
                 st.markdown("**概念名称**")
             with hd_a:
                 st.markdown("**操作**")
-            st.divider()
+            st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
             for i, c in enumerate(group):
                 col_l, col_a = st.columns([6, 4])
                 with col_l:
@@ -556,7 +556,7 @@ def render_history() -> None:
                             st.session_state[f"confirm_x_{c['id']}"] = True
                             st.rerun()
                 if i < len(group) - 1:
-                    st.divider()
+                    st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
 
     pending_delete = next(
         (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
@@ -728,6 +728,26 @@ def inject_css() -> None:
         div.msg-user {
             background: #EFEBE4; padding: 10px 14px; border-radius: 12px;
             margin: 6px 0 6px auto; line-height: 1.6; max-width: 85%;
+        }
+        /* V0.2.3 — 历史页掌握度表格紧凑化：Excel 风格行高，低留白 */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 2px 8px;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] > div[data-testid="stVerticalBlock"] {
+            gap: 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] {
+            gap: 8px;
+            padding: 1px 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stMarkdownContainer"] {
+            line-height: 1.2;
+            margin: 0;
+        }
+        .row-divider {
+            border-top: 1px solid rgba(128, 128, 128, 0.35);
+            height: 0;
+            margin: 1px 0;
         }
         </style>""",
         unsafe_allow_html=True,
