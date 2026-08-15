@@ -87,15 +87,22 @@ class FakeClient:
 class FlakyClient(FakeClient):
     """FakeClient that can simulate AI timeout/network failures on demand."""
 
-    def __init__(self, questions, *, fail_judge: int = 0, fail_deeper: int = 0) -> None:
+    def __init__(self, questions, *, fail_judge: int = 0, fail_deeper: int = 0,
+                 fail_task: int = 0) -> None:
         super().__init__(questions)
         self.fail_judge = fail_judge
         self.fail_deeper = fail_deeper
+        self.fail_task = fail_task
         self._judge_calls = 0
         self._deeper_calls = 0
+        self._task_calls = 0
 
     def chat(self, messages, **kwargs) -> str:
         user = messages[1]["content"]
+        if "检验学习者是真的搞懂了" in user:
+            self._task_calls += 1
+            if self._task_calls <= self.fail_task:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
         if "是否体现了真正的理解" in user:
             self._judge_calls += 1
             if self._judge_calls <= self.fail_judge:
@@ -790,6 +797,55 @@ def test_app_deepening_timeout_skip_to_complete(monkeypatch, configured_app) -> 
     assert session.stage == "complete"
     assert session.phase == "connections"
     assert "v_ai_error" not in at.session_state
+
+
+class JunkTaskClient(FakeClient):
+    """FakeClient that returns non-JSON for the validation-task prompt."""
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "检验学习者是真的搞懂了" in user:
+            return "抱歉我这次没按格式输出"
+        return super().chat(messages, **kwargs)
+
+
+def test_app_start_validation_timeout_retryable(monkeypatch, configured_app) -> None:
+    """读完后点「开始验证」时 AI 超时：不转圈不崩，留在阅读阶段，可重试恢复。"""
+    fake = FlakyClient([{"question": "Q", "correct": True, "feedback": "通过"}], fail_task=1)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "reading"  # 失败不前进，留在阅读阶段可重试
+    assert any("❌" in m["text"] for m in at.session_state["messages"] if m["text"])
+    assert any("重试" in m["text"] for m in at.session_state["messages"] if m["text"])
+    # 按钮还在 → 用户可以再点一次重试
+    assert any("我读完了，开始验证" in (b.label or "") for b in at.button)
+
+    # 重试 → 第二次成功 → 进入验证阶段
+    at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
+
+
+def test_app_start_validation_malformed_reply_friendly_error(
+    monkeypatch, configured_app
+) -> None:
+    """验证任务 AI 返回非 JSON：不抛未捕获异常，转为友好提示并可重试。"""
+    monkeypatch.setattr(
+        "core.session.DeepSeekClient", lambda: JunkTaskClient([])
+    )
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "reading"  # 未崩溃、未前进，仍可重试
+    assert any("格式不正确" in m["text"] for m in at.session_state["messages"] if m["text"])
+    assert any("我读完了，开始验证" in (b.label or "") for b in at.button)
 
 
 # ----------------------------------------------------- V0.3.0 session resume

@@ -13,6 +13,8 @@ import warnings
 from functools import wraps
 from typing import Any, Callable
 
+from pydantic import ValidationError
+
 from core.client import DeepSeekClient, DeepSeekError
 from core.database import (
     get_all_concepts,
@@ -346,13 +348,19 @@ class LearningSession:
         checks real understanding. Returns the task text.
         """
         cid = self._require_started()
+        logger.info(
+            "[DEBUG] start_validation 开始：concept=%s id=%s（拼接验证任务 prompt）",
+            self.title,
+            cid,
+        )
         prompt = validation_task_prompt(
             title=self.title,
             source_text=self.source_text,
             qa_history=self._format_history(),
         )
         reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "设计验证任务")
-        task: ValidationTask = validate_response(reply, ValidationTask)
+        task = self._parse_or_raise(reply, ValidationTask, "验证任务")
+        logger.info("[DEBUG] 验证任务设计完成：task=%r", task.task)
         self.validation_task = task.task
         self.validation_target = task.target
         self.validation_attempts = 0
@@ -385,7 +393,7 @@ class LearningSession:
             JUDGE_TEMPERATURE,
             "判断验证作答",
         )
-        result: ValidateAnswerResult = validate_response(reply, ValidateAnswerResult)
+        result = self._parse_or_raise(reply, ValidateAnswerResult, "验证判定")
 
         if result.is_correct:
             self.validation_passed = True
@@ -575,6 +583,23 @@ class LearningSession:
             len(reply),
         )
         return reply
+
+    def _parse_or_raise(self, reply: str, model: Any, what: str) -> Any:
+        """Validate AI JSON output with a friendly failure.
+
+        A malformed reply must become a retry-able ``SessionError`` the UI can
+        show, not an uncaught pydantic/ValueError that crashes the page.
+        """
+        try:
+            return validate_response(reply, model)
+        except (ValueError, ValidationError) as exc:
+            logger.error(
+                "AI 返回解析失败[%s]: %s —— 回复前 200 字=%r",
+                what,
+                exc,
+                reply[:200],
+            )
+            raise SessionError(f"AI 返回的「{what}」格式不正确，请重试。") from exc
 
     # --------------------------------------------------------------- internals
 

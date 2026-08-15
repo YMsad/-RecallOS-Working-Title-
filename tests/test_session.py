@@ -493,6 +493,15 @@ def test_start_validation_designs_task_and_sets_stage() -> None:
     assert "验证任务" in payload
 
 
+def test_start_validation_malformed_reply_raises_friendly_session_error() -> None:
+    """AI 返回非 JSON：转成可重试的 SessionError，而不是未捕获的校验异常。"""
+    session, _ = make_session(text_reply("Q1"), text_reply("抱歉，我这次没按格式输出"))
+    session.start()
+    with pytest.raises(SessionError, match="格式不正确"):
+        session.start_validation()
+    assert session.stage == "learning"  # 失败不前进
+
+
 def test_validation_success_sets_passed() -> None:
     session, _ = make_session(
         text_reply("Q1"),

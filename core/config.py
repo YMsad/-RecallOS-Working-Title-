@@ -80,7 +80,9 @@ class Settings(BaseSettings):
     # 30 秒超时：连接/读取/写入任一阶段超时都会抛 DeepSeekNetworkError（不再死等）。
     # 可通过环境变量 REQUEST_TIMEOUT 覆盖。
     request_timeout: float = 30.0
-    max_retries: int = 3
+    # 重试次数少一点：只对瞬时网络错误/限流生效，避免「超时×多次重试」把单次失败
+    # 放大到几分钟（最坏约 60s 内就能抛错并让用户在 UI 上看到重试入口）。
+    max_retries: int = 2
     retry_backoff: float = 1.0
     retry_jitter: float = 0.5
     retryable_statuses: frozenset[int] = frozenset({429, 500, 502, 503, 504})

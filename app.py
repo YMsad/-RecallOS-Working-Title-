@@ -383,7 +383,9 @@ def _render_learning_new(session: LearningSession) -> None:
                 st.session_state.messages.append(
                     {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
             except (DeepSeekError, SessionError) as exc:
-                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+                st.session_state.messages.append(
+                    {"role": "assistant",
+                     "text": f"❌ {exc}\n\n再点一次下方「我读完了，开始验证」即可重试。"})
             st.rerun()
         render_messages()
         return
