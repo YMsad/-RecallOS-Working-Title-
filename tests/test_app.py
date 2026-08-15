@@ -19,6 +19,7 @@ class FakeClient:
         self.questions = list(questions)
         self.related = list(related)
         self.i = 0
+        self.depth = 0
 
     def __enter__(self) -> "FakeClient":
         return self
@@ -61,6 +62,24 @@ class FakeClient:
             return f"开场问题{self.i + 1}"
         if "层追问" in user:
             return f"问题{self.i + 1}"
+        # ---- V0.3.0 — 新流程 prompt 分支 ----
+        if "检验学习者是真的搞懂了" in user:
+            return json.dumps(
+                {"task": "用一句话向朋友解释机会成本", "target": "说出被放弃的次优选择"},
+                ensure_ascii=False,
+            )
+        if "是否体现了真正的理解" in user:
+            q = self.questions[self.i]
+            self.i += 1
+            return json.dumps(
+                {"is_correct": q["correct"], "feedback": q["feedback"], "missing": q.get("hint")},
+                ensure_ascii=False,
+            )
+        if "讲得不够简单" in user:
+            return "更简单的大白话：机会成本就是你为了A而放弃的B。"
+        if "层深化" in user:
+            self.depth += 1
+            return f"深化问题{self.depth}"
         raise AssertionError(f"unexpected prompt: {user[:40]}")
 
 
@@ -79,6 +98,14 @@ def configured_app(monkeypatch, tmp_path):
     from core import config
 
     config.reset_settings_cache()
+    yield
+
+
+@pytest.fixture
+def legacy_flow(monkeypatch):
+    """V0.3.0 — 固定旧流程（RECALLOS_NEW_FLOW=0），让旧四层追问测试保持原样。
+    AppTest 会以新脚本进程执行 app.py，必须通过环境变量而不是模块属性来切换。"""
+    monkeypatch.setenv("RECALLOS_NEW_FLOW", "0")
     yield
 
 
@@ -143,7 +170,7 @@ def test_app_save_key_returns_to_home(monkeypatch, tmp_path) -> None:
     assert config.get_api_key_from_config() == "sk-app-saved"
 
 
-def test_app_full_flow(monkeypatch, configured_app) -> None:
+def test_app_full_flow(monkeypatch, configured_app, legacy_flow) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=30).run()
 
@@ -193,14 +220,15 @@ def test_app_history_view(monkeypatch, configured_app) -> None:
     assert "操作" in markdown_text(at)
 
 
-def test_app_mode_toggle_on_home(configured_app) -> None:
+def test_app_mode_toggle_on_home(configured_app, legacy_flow) -> None:
+    """旧流程首页保留「有基础」切换（新流程首页不再显示）。"""
     at = AppTest.from_file(APP, default_timeout=15).run()
     assert not at.exception
     assert len(at.toggle) == 1
     assert "有基础" in at.toggle[0].label
 
 
-def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app) -> None:
+def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app, legacy_flow) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -212,7 +240,7 @@ def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app) -> 
     assert "开场问题" in markdown_text(at)
 
 
-def test_app_explain_button(monkeypatch, configured_app) -> None:
+def test_app_explain_button(monkeypatch, configured_app, legacy_flow) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=15).run()
     at.text_input[0].input("机会成本")
@@ -223,7 +251,7 @@ def test_app_explain_button(monkeypatch, configured_app) -> None:
     assert "我换个说法" in markdown_text(at)
 
 
-def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app) -> None:
+def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app, legacy_flow) -> None:
     """每个回答只产生一个 AI 气泡（反馈与下一问合并），不会出现两个气泡。"""
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -254,7 +282,7 @@ def test_app_warmup_button_shows_prewarm_text(monkeypatch, configured_app) -> No
     )
 
 
-def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app) -> None:
+def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app, legacy_flow) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -504,3 +532,112 @@ def test_app_delete_from_table(configured_app) -> None:
     assert database.get_concept(b) is not None
     assert "机会成本" not in markdown_text(at)
     assert "📖 学习中" in markdown_text(at)
+
+
+# ---------------------------------------------------------------- V0.3.0 UI
+
+
+def _start_new_flow(at: AppTest) -> AppTest:
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    return click_by_label(at, "开始")
+
+
+def test_app_new_flow_home_drops_mode_toggle(configured_app) -> None:
+    """新流程首页不再显示「有基础」模式切换。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert not any("有基础" in (t.label or "") for t in at.toggle)
+    assert any("概念名" in (ti.label or "") for ti in at.text_input)
+
+
+def test_app_new_flow_reading_to_validation(monkeypatch, configured_app) -> None:
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert not at.exception
+    assert current_step(at) == "learning"
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "reading"
+    assert any("阅读中" in (i.value or "") for i in at.info)
+    assert any("先读原文" in m["text"] for m in at.session_state["messages"])
+
+    at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
+    assert any("😵 我看不懂" in (b.label or "") for b in at.button)
+
+    # 我看不懂 → 大白话解释，阶段不变
+    at = click_by_label(at, "我看不懂")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("更简单的大白话" in m["text"] for m in at.session_state["messages"])
+
+
+def test_app_new_flow_validation_pass_enters_deepening(monkeypatch, configured_app) -> None:
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.validation_passed is True
+    assert session.stage == "deepening"
+    # 已生成第一道深化问题并入气泡
+    msgs = at.session_state["messages"]
+    assert any("深化追问" in m["text"] for m in msgs)
+    assert any("深化问题" in m["text"] for m in msgs)
+
+    # 作答后推进到下一道（深化问题不判对错）
+    at = at.chat_input[0].set_value("想").run()
+    assert not at.exception
+    deeper = [m for m in at.session_state["messages"] if "深化问题" in m["text"]]
+    assert len(deeper) == 2
+
+
+def test_app_new_flow_three_failures_relearn_and_retry(monkeypatch, configured_app) -> None:
+    fake = FakeClient([{"question": "Q", "correct": False, "feedback": "再想想"}] * 3)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    for _ in range(3):
+        at = at.chat_input[0].set_value("错").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "relearn"
+    assert session.needs_relearning is True
+    assert any("重新学" in (e.value or "") for e in at.error)
+    assert any("重新读一遍" in (b.label or "") for b in at.button)
+
+    # 重新读一遍 → 回到验证阶段，重新出任务
+    at = click_by_label(at, "重新读一遍")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("新一轮验证" in m["text"] for m in at.session_state["messages"])
+
+
+def test_app_new_flow_complete_goes_to_connections(monkeypatch, configured_app) -> None:
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过
+    for _ in range(5):
+        at = at.chat_input[0].set_value("想").run()  # 5 道深化追问
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert any("所有深化追问" in (s.value or "") for s in at.success)
+
+    at = click_by_label(at, "进入总结")
+    assert not at.exception
+    assert current_step(at) == "connections"
+    assert "发现一些知识连接" in markdown_text(at)

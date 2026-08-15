@@ -5,10 +5,13 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import streamlit as st
 
 from core import (
+    DEEPER_QUESTION_ORDER,
     DeepSeekAuthError,
     DeepSeekError,
     LearningSession,
@@ -47,6 +50,21 @@ MASTERY_LABELS = {
     MASTERY_LEARNING: "📖 学习中",
 }
 _MASTERY_ORDER = [MASTERY_UNDERSTOOD, MASTERY_UNCLEAR, MASTERY_LEARNING]
+
+# V0.3.0 — 新流程开关：RECALLOS_NEW_FLOW=0 时走旧四层追问流程（保留）
+_NEW_FLOW = os.environ.get("RECALLOS_NEW_FLOW", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+STAGE_LABELS = {
+    "reading": "📖 阅读中",
+    "validation": "🧠 验证理解",
+    "deepening": "🔍 深化追问",
+    "complete": "✅ 已完成",
+    "relearn": "🔄 需要重新学习",
+}
 
 
 def reset_to_home() -> None:
@@ -113,18 +131,22 @@ def render_home() -> None:
             _navigate("review_list")
 
     # V0.2.0 — 零基础/有基础模式切换 + 动态开场（2 个快速问题）
+    # V0.3.0 — 新流程不再需要模式切换与开场偏好设置（旧流程保留，RECALLOS_NEW_FLOW=0 时恢复）
     mode = "beginner"
-    if st.toggle("有基础（对这个概念有一定了解）", value=False, key="mode_toggle"):
-        mode = "advanced"
-    with st.expander("告诉我一点你的情况，我会调整开场（可选）"):
-        level_map = {"完全没接触过": "zero", "听说过一点": "some", "比较熟悉": "familiar"}
-        interest_map = {
-            "先弄懂基本意思": "simple",
-            "想深入理解": "deep",
-            "想结合生活例子": "example",
-        }
-        level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
-        interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
+    level_label = "完全没接触过"
+    interest_label = "先弄懂基本意思"
+    if not _NEW_FLOW:
+        if st.toggle("有基础（对这个概念有一定了解）", value=False, key="mode_toggle"):
+            mode = "advanced"
+        with st.expander("告诉我一点你的情况，我会调整开场（可选）"):
+            level_map = {"完全没接触过": "zero", "听说过一点": "some", "比较熟悉": "familiar"}
+            interest_map = {
+                "先弄懂基本意思": "simple",
+                "想深入理解": "deep",
+                "想结合生活例子": "example",
+            }
+            level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
+            interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
 
     # V0.2.3 — 预热按钮移到概念名输入框右侧（同一行，零基础模式）
     col_title, col_warm = st.columns([5, 1])
@@ -159,7 +181,28 @@ def render_home() -> None:
     if st.button("开始", type="primary", use_container_width=True, key="start_learning"):
         if not title.strip():
             st.info("试试粘贴一段课本内容")
+        elif _NEW_FLOW:
+            # V0.3.0 — 新流程：只存概念，先进入「阅读原文」阶段
+            try:
+                session = LearningSession(title, source)
+                session.flow = "new"
+                session.begin()
+                st.session_state.session = session
+                messages = []
+                if st.session_state.get("warmup_text"):
+                    messages.append({"role": "assistant", "text": f"💡 {st.session_state['warmup_text']}"})
+                messages.append(
+                    {"role": "assistant",
+                     "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了，开始验证」。"})
+                st.session_state.messages = messages
+                st.session_state.step = "learning"
+                st.rerun()
+            except DeepSeekAuthError:
+                st.error("Key 无效，请重新输入")
+            except DeepSeekError as exc:
+                st.error(f"AI 调用失败：{exc}")
         else:
+            # 旧流程（保留）：开场问题 + 四层追问
             try:
                 with st.spinner("AI 正在思考…"):
                     session = LearningSession(
@@ -201,8 +244,25 @@ def render_messages() -> None:
         st.markdown(f'<div class="{bubble}">{m["text"]}</div>', unsafe_allow_html=True)
 
 
+def _render_stage_indicator(session: LearningSession) -> None:
+    """V0.3.0 — 顶部阶段指示器（仅新流程会话显示）。"""
+    if getattr(session, "flow", "legacy") != "new":
+        return
+    label = STAGE_LABELS.get(session.stage, session.stage)
+    st.info(f"当前阶段: {label}")
+
+
 def render_learning() -> None:
     session = st.session_state.session
+    _render_stage_indicator(session)
+    if getattr(session, "flow", "legacy") == "new":
+        _render_learning_new(session)
+    else:
+        _render_learning_old(session)
+
+
+def _render_learning_old(session: LearningSession) -> None:
+    # 旧流程（V0.3.0 之前）：保留四层追问 UI
     answer = st.chat_input("你的回答…")
 
     if answer:
@@ -253,6 +313,151 @@ def render_learning() -> None:
 
     if st.session_state.step == "connections":
         render_connections()
+
+
+def _render_learning_new(session: LearningSession) -> None:
+    # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深化追问 → 完成
+    stage = session.stage
+
+    if stage == "reading":
+        st.markdown("### 📖 阅读原文")
+        if session.source_text.strip():
+            st.markdown(session.source_text)
+        else:
+            st.info("没有粘贴原文，直接开始验证也可以。")
+        if st.button("我读完了，开始验证", key="v_read_done"):
+            try:
+                with st.spinner("AI 正在设计验证任务…"):
+                    task_text = session.start_validation()
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"📝 验证你的理解：\n\n{task_text}"})
+            except DeepSeekAuthError:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.rerun()
+        render_messages()
+        return
+
+    if stage == "validation":
+        st.markdown("### 📝 验证你的理解")
+        with st.expander("📄 再看一眼原文"):
+            st.markdown(session.source_text or "（没有粘贴原文）")
+
+        if st.button("😵 我看不懂，帮我解释", key="v_explain_btn"):
+            try:
+                with st.spinner("生成大白话解释…"):
+                    explanation = session.ask_simplify()
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"💡 大白话：\n\n{explanation}"})
+            except DeepSeekAuthError:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.rerun()
+
+        answer = st.chat_input("你的回答…")
+        if answer:
+            st.session_state.messages.append({"role": "user", "text": answer})
+            try:
+                with st.spinner("AI 正在判断…"):
+                    result = session.submit_validation(answer)
+                if result["passed"]:
+                    reply = f"✅ {result['feedback']}"
+                else:
+                    reply = f"🤔 {result['feedback']}"
+                    if result.get("missing"):
+                        reply += f"\n\n💡 还差一点点：{result['missing']}"
+                    if result.get("needs_relearning"):
+                        reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
+                st.session_state.messages.append({"role": "assistant", "text": reply})
+            except DeepSeekAuthError:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.rerun()
+        render_messages()
+        return
+
+    if stage == "deepening":
+        question = st.session_state.get("v_deeper_question")
+        if question is None:
+            try:
+                with st.spinner("AI 正在出下一道更难的问题…"):
+                    question = session.next_deeper_question()
+            except DeepSeekAuthError:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+                render_messages()
+                return
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+                render_messages()
+                return
+            if question:
+                total = len(DEEPER_QUESTION_ORDER)
+                st.session_state.messages.append(
+                    {"role": "assistant",
+                     "text": f"🔍 深化追问（第 {session.current_deeper_index}/{total} 问）：\n\n{question}"})
+                st.session_state["v_deeper_question"] = question
+                st.rerun()
+
+        if question is None:
+            st.success("🎉 所有深化追问都完成啦！")
+            render_messages()
+            if st.button("进入总结", type="primary", use_container_width=True, key="v_finish"):
+                st.session_state.pop("v_deeper_question", None)
+                _navigate("connections")
+            return
+
+        st.markdown("### 🔍 深化追问")
+        st.caption("这些问题没有对错，想到哪说到哪。")
+        answer = st.chat_input("你的思考…")
+        if answer:
+            st.session_state.messages.append({"role": "user", "text": answer})
+            try:
+                session.submit_deeper_answer(answer)
+            except SessionError as exc:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"❌ {exc}"})
+            st.session_state.messages.append(
+                {"role": "assistant", "text": "👍 记下来了，继续下一道。"})
+            st.session_state["v_deeper_question"] = None
+            st.rerun()
+
+        render_messages()
+        return
+
+    if stage == "complete":
+        st.success("🎉 所有深化追问都完成啦！")
+        render_messages()
+        if st.button("进入总结", type="primary", use_container_width=True, key="v_finish"):
+            st.session_state.pop("v_deeper_question", None)
+            _navigate("connections")
+        return
+
+    if stage == "relearn":
+        st.error("连续 3 次没有通过验证，这个知识点建议回看原文后重新学习。")
+        if st.button("重新读一遍，再试一次", key="v_retry"):
+            try:
+                with st.spinner("AI 正在重新设计验证任务…"):
+                    task_text = session.start_validation()
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"📝 新一轮验证：\n\n{task_text}"})
+            except DeepSeekAuthError:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+            st.rerun()
+        render_messages()
+        return
+
+    # 未知阶段兜底：只显示对话气泡
+    render_messages()
 
 
 # ------------------------------------------------------------------- review

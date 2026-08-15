@@ -145,6 +145,9 @@ class LearningSession:
         self.deeper_history: list[dict[str, str]] = []
         self._last_explanation: str | None = None
 
+        # V0.3.0 — 流程标记：''new''＝新流程（阅读→验证→深化），''legacy''＝旧四层追问
+        self.flow: str = "legacy"
+
     # ------------------------------------------------------------------ flow
 
     def start(self) -> str:
@@ -155,6 +158,22 @@ class LearningSession:
         self._current_question = self._generate_opening_question()
         logger.info("Session started for concept %s (id=%s)", self.title, self.concept_id)
         return self._current_question
+
+    def begin(self) -> int:
+        """V0.3.0 — start the new flow without the old opening question: only
+        persist the concept and enter the reading stage. Returns the concept id.
+        """
+        if self.concept_id is not None:
+            return self.concept_id
+        self.concept_id = save_concept(self.title, self.source_text)
+        self.phase = "learning"
+        self.stage = "reading"
+        logger.info(
+            "Session begun (V0.3.0 flow) for concept %s (id=%s)",
+            self.title,
+            self.concept_id,
+        )
+        return self.concept_id
 
     def warmup(self) -> str:
         """Give a 1-2 sentence plain-language intro (zero-basis pre-warm), or '' if
@@ -362,6 +381,8 @@ class LearningSession:
         if result.is_correct:
             self.validation_passed = True
             self.validation_attempts = 0
+            # 验证通过 → 进入深化追问阶段
+            self.stage = "deepening"
         else:
             self.validation_attempts += 1
             if self.validation_attempts >= VALIDATION_MAX_ATTEMPTS:
@@ -409,6 +430,10 @@ class LearningSession:
         cid = self._require_started()
         if self.current_deeper_index >= len(DEEPER_QUESTION_ORDER):
             self._current_deeper_question = None
+            # 深化追问全部问完 → 新流程学习完成，进入连接/总结阶段并入复习队列
+            self.stage = "complete"
+            self.phase = "connections"
+            add_to_review_queue(cid)
             return None
 
         qtype = DEEPER_QUESTION_ORDER[self.current_deeper_index]

@@ -98,6 +98,20 @@ def test_start_saves_concept_and_returns_question() -> None:
     assert row["mastery"] == "学习中"
 
 
+def test_begin_saves_concept_and_enters_reading_stage() -> None:
+    """V0.3.0 — 新流程 begin()：只存概念、不生成开场问题，进入阅读阶段。"""
+    session, transport = make_session()
+    cid = session.begin()
+    assert cid is not None
+    assert transport.requests == []  # 不调用任何 AI，不消耗脚本
+    assert session.stage == "reading"
+    assert session.flow == "legacy"
+    assert session.phase == "learning"
+    assert database.get_concept(cid)["title"] == "机会成本"
+    # 幂等：重复调用返回同一个 concept_id
+    assert session.begin() == cid
+
+
 def test_full_flow_all_correct() -> None:
     database.save_concept("沉没成本", "已学过的概念")
     session, transport = make_session(
@@ -489,6 +503,8 @@ def test_validation_success_sets_passed() -> None:
     assert result["needs_relearning"] is False
     assert session.validation_passed is True
     assert session.validation_attempts == 0
+    # 验证通过后进入深化追问阶段
+    assert session.stage == "deepening"
 
 
 def test_validation_three_failures_marks_needs_relearning() -> None:
@@ -569,6 +585,9 @@ def test_next_deeper_question_runs_full_sequence() -> None:
     assert session.current_deeper_index == 5
     assert len(session.deeper_questions) == 5
     assert session.next_deeper_question() is None
+    # 深化追问全部问完 → 新流程学习完成并加入复习队列
+    assert session.stage == "complete"
+    assert session.phase == "connections"
 
     deeper_payloads = [
         p["messages"][1]["content"]
