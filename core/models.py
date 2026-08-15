@@ -52,6 +52,18 @@ class Concept(RecallBaseModel):
     mastery: Mastery = MASTERY_LEARNING
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # ---- V0.3.0 — 新流程（阅读→验证→深化）会话状态字段 ----
+    stage: str | None = None
+    validation_type: OptionalStr = None
+    validation_task: OptionalStr = None
+    validation_target: OptionalStr = None
+    validation_passed: bool = False
+    validation_attempts: int = 0
+    validation_history: OptionalStr = None
+    needs_relearning: bool = False
+    deeper_questions: OptionalStr = None
+    deeper_answers: OptionalStr = None
+    deeper_index: int = 0
 
 
 class QARecord(RecallBaseModel):

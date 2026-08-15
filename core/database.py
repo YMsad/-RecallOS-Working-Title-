@@ -35,7 +35,18 @@ CREATE TABLE IF NOT EXISTS concepts (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     next_review_date DATE,
     review_stage INTEGER NOT NULL DEFAULT 0,
-    review_count INTEGER NOT NULL DEFAULT 0
+    review_count INTEGER NOT NULL DEFAULT 0,
+    validation_type TEXT,
+    validation_task TEXT,
+    validation_target TEXT,
+    validation_passed INTEGER NOT NULL DEFAULT 0,
+    validation_attempts INTEGER NOT NULL DEFAULT 0,
+    validation_history TEXT,
+    needs_relearning INTEGER NOT NULL DEFAULT 0,
+    deeper_questions TEXT,
+    deeper_answers TEXT,
+    deeper_index INTEGER NOT NULL DEFAULT 0,
+    stage TEXT
 );
 
 CREATE TABLE IF NOT EXISTS qa_records (
@@ -144,12 +155,24 @@ def init_db() -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add V0.2.2 columns to pre-existing concepts tables (idempotent)."""
+    """Add V0.2.2/V0.3.0 columns to pre-existing concepts tables (idempotent)."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(concepts)")}
     for col, ddl in (
         ("next_review_date", "next_review_date DATE"),
         ("review_stage", "review_stage INTEGER NOT NULL DEFAULT 0"),
         ("review_count", "review_count INTEGER NOT NULL DEFAULT 0"),
+        # ---- V0.3.0 — 新流程（阅读→验证→深化）恢复所需的持久化字段 ----
+        ("validation_type", "validation_type TEXT"),
+        ("validation_task", "validation_task TEXT"),
+        ("validation_target", "validation_target TEXT"),
+        ("validation_passed", "validation_passed INTEGER NOT NULL DEFAULT 0"),
+        ("validation_attempts", "validation_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("validation_history", "validation_history TEXT"),
+        ("needs_relearning", "needs_relearning INTEGER NOT NULL DEFAULT 0"),
+        ("deeper_questions", "deeper_questions TEXT"),
+        ("deeper_answers", "deeper_answers TEXT"),
+        ("deeper_index", "deeper_index INTEGER NOT NULL DEFAULT 0"),
+        ("stage", "stage TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE concepts ADD COLUMN {ddl}")
@@ -206,6 +229,17 @@ def update_concept(
     next_review_date: str | None = None,
     review_stage: int | None = None,
     review_count: int | None = None,
+    stage: str | None = None,
+    validation_type: str | None = None,
+    validation_task: str | None = None,
+    validation_target: str | None = None,
+    validation_passed: bool | None = None,
+    validation_attempts: int | None = None,
+    validation_history: str | None = None,
+    needs_relearning: bool | None = None,
+    deeper_questions: str | None = None,
+    deeper_answers: str | None = None,
+    deeper_index: int | None = None,
 ) -> bool:
     """Update any subset of a concept's fields. Returns True if a row changed."""
     if mastery is not None and mastery not in MASTERY_VALUES:
@@ -225,6 +259,29 @@ def update_concept(
         fields["review_stage"] = review_stage
     if review_count is not None:
         fields["review_count"] = review_count
+    # ---- V0.3.0 — 新流程状态字段（None 表示不更新；False/0 表示写入清零） ----
+    if stage is not None:
+        fields["stage"] = stage
+    if validation_type is not None:
+        fields["validation_type"] = validation_type
+    if validation_task is not None:
+        fields["validation_task"] = validation_task
+    if validation_target is not None:
+        fields["validation_target"] = validation_target
+    if validation_passed is not None:
+        fields["validation_passed"] = int(validation_passed)
+    if validation_attempts is not None:
+        fields["validation_attempts"] = int(validation_attempts)
+    if validation_history is not None:
+        fields["validation_history"] = validation_history
+    if needs_relearning is not None:
+        fields["needs_relearning"] = int(needs_relearning)
+    if deeper_questions is not None:
+        fields["deeper_questions"] = deeper_questions
+    if deeper_answers is not None:
+        fields["deeper_answers"] = deeper_answers
+    if deeper_index is not None:
+        fields["deeper_index"] = int(deeper_index)
     if not fields:
         return True
     set_clause = ", ".join(f"{key} = ?" for key in fields)

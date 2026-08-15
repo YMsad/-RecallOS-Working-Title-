@@ -641,3 +641,87 @@ def test_app_new_flow_complete_goes_to_connections(monkeypatch, configured_app) 
     assert not at.exception
     assert current_step(at) == "connections"
     assert "发现一些知识连接" in markdown_text(at)
+
+
+# ----------------------------------------------------- V0.3.0 session resume
+
+
+def _seed_new_flow_concept(**updates) -> int:
+    """Create a concept saved in the middle of the V0.3.0 new flow."""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    fields = {
+        "stage": "validation",
+        "validation_task": "用一句话向朋友解释机会成本",
+        "validation_target": "说出被放弃的次优选择",
+        "validation_passed": False,
+        "validation_attempts": 1,
+        "validation_history": json.dumps(
+            [
+                {
+                    "answer": "第一次回答",
+                    "passed": False,
+                    "feedback": "再想想",
+                    "missing": "缺关键点",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    }
+    fields.update(updates)
+    database.update_concept(cid, **fields)
+    return cid
+
+
+def test_app_continue_new_flow_resumes_validation(configured_app) -> None:
+    cid = _seed_new_flow_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "validation"
+    assert session.validation_attempts == 1
+    assert session.validation_task == "用一句话向朋友解释机会成本"
+
+    # 重建的消息气泡：验证任务 + 上次回答
+    msgs = at.session_state["messages"]
+    assert any("用一句话向朋友解释机会成本" in m["text"] for m in msgs)
+    assert any(m["text"] == "第一次回答" for m in msgs)
+    assert any(m["text"].startswith("🤔 再想想") for m in msgs)
+    # UI 直接渲染验证任务（不依赖气泡）
+    assert any("用一句话向朋友解释机会成本" in m.value for m in at.markdown)
+
+
+def test_app_continue_new_flow_resumes_deepening(configured_app) -> None:
+    cid = _seed_new_flow_concept(
+        stage="deepening",
+        validation_passed=True,
+        validation_attempts=0,
+        validation_history=json.dumps(
+            [{"answer": "是对放弃的选择", "passed": True, "feedback": "很好"}],
+            ensure_ascii=False,
+        ),
+        deeper_questions=json.dumps(
+            ["深化问题一：如果不考虑机会成本会怎样？"], ensure_ascii=False
+        ),
+        deeper_answers=json.dumps([]),
+        deeper_index=1,
+    )
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "deepening"
+    assert session._current_deeper_question == "深化问题一：如果不考虑机会成本会怎样？"
+    # 屏幕上那道未回答的深化问题被还原，不会重复生成
+    assert "v_deeper_question" in at.session_state
+    assert at.session_state["v_deeper_question"] == "深化问题一：如果不考虑机会成本会怎样？"
+    assert any("深化问题一" in m["text"] for m in at.session_state["messages"])
+    assert any("当前阶段: 🔍 深化追问" in (i.value or "") for i in at.info)

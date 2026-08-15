@@ -7,6 +7,7 @@ Every AI call is scriptable through an injected :class:`DeepSeekClient`
 
 from __future__ import annotations
 
+import json
 import logging
 import warnings
 from functools import wraps
@@ -15,6 +16,8 @@ from typing import Any, Callable
 from core.client import DeepSeekClient
 from core.database import (
     get_all_concepts,
+    get_concept,
+    get_qa_history,
     save_concept,
     save_connection,
     save_daily_summary,
@@ -138,6 +141,7 @@ class LearningSession:
         self.validation_target: str | None = None
         self.validation_attempts: int = 0
         self.validation_passed: bool = False
+        self.validation_history: list[dict[str, Any]] = []
         self.needs_relearning: bool = False
         self.deeper_questions: list[str] = []
         self.current_deeper_index: int = 0
@@ -168,6 +172,7 @@ class LearningSession:
         self.concept_id = save_concept(self.title, self.source_text)
         self.phase = "learning"
         self.stage = "reading"
+        self._persist_new_flow()
         logger.info(
             "Session begun (V0.3.0 flow) for concept %s (id=%s)",
             self.title,
@@ -354,6 +359,7 @@ class LearningSession:
         self.validation_passed = False
         self.needs_relearning = False
         self.stage = "validation"
+        self._persist_new_flow()
         logger.info("Validation started for concept %s (id=%s)", self.title, cid)
         return self.validation_task
 
@@ -395,6 +401,16 @@ class LearningSession:
                     cid,
                 )
 
+        self.validation_history.append(
+            {
+                "answer": answer,
+                "passed": bool(result.is_correct),
+                "feedback": result.feedback,
+                "missing": result.missing,
+            }
+        )
+        self._persist_new_flow()
+
         return {
             "passed": self.validation_passed,
             "feedback": result.feedback,
@@ -433,6 +449,7 @@ class LearningSession:
             # 深化追问全部问完 → 新流程学习完成，进入连接/总结阶段并入复习队列
             self.stage = "complete"
             self.phase = "connections"
+            self._persist_new_flow()
             add_to_review_queue(cid)
             return None
 
@@ -448,6 +465,7 @@ class LearningSession:
         self.deeper_questions.append(question)
         self._current_deeper_question = question
         self.current_deeper_index += 1
+        self._persist_new_flow()
         logger.info(
             "Deeper question %d/%d (%s) for concept %s (id=%s)",
             self.current_deeper_index,
@@ -474,6 +492,7 @@ class LearningSession:
                 "answer": answer,
             }
         )
+        self._persist_new_flow()
         logger.info("Deeper answer recorded for concept %s (id=%s)", self.title, cid)
         return {
             "question": self._current_deeper_question,
@@ -482,6 +501,38 @@ class LearningSession:
         }
 
     # --------------------------------------------------------------- internals
+
+    def _persist_new_flow(self) -> None:
+        """V0.3.0 — 把新流程（阅读→验证→深化）的会话状态写入 concepts 表，
+        这样「继续学习」可以从数据库恢复中断的会话。"""
+        if self.concept_id is None:
+            return
+        update_concept(
+            self.concept_id,
+            stage=self.stage,
+            validation_type=self.text_type,
+            validation_task=self.validation_task,
+            validation_target=self.validation_target,
+            validation_passed=self.validation_passed,
+            validation_attempts=self.validation_attempts,
+            needs_relearning=self.needs_relearning,
+            validation_history=(
+                json.dumps(self.validation_history, ensure_ascii=False)
+                if self.validation_history
+                else None
+            ),
+            deeper_questions=(
+                json.dumps(self.deeper_questions, ensure_ascii=False)
+                if self.deeper_questions
+                else None
+            ),
+            deeper_answers=(
+                json.dumps(self.deeper_history, ensure_ascii=False)
+                if self.deeper_history
+                else None
+            ),
+            deeper_index=self.current_deeper_index,
+        )
 
     def _require_started(self) -> int:
         if self.concept_id is None:
@@ -617,10 +668,92 @@ class LearningSession:
         return "\n".join(lines)
 
 
+def _load_json_list(raw: Any) -> list[Any]:
+    """Parse a JSON-list column value; return [] for empty/invalid content."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def restore_session(
+    concept_id: int, *, client: DeepSeekClient | None = None
+) -> LearningSession:
+    """V0.3.0 — 从数据库恢复一个已开始的「继续学习」会话。
+
+    - 若概念带有新流程标记（``stage`` 或 ``validation_type`` 非空，即它是在
+      V0.3.0 新流程里开始学习的），重建完整的「阅读→验证→深化」状态，
+      精确恢复到上次中断的阶段（含验证次数、深化进度、验证与深化回答历史）。
+    - 否则退化为旧流程恢复（只重建四层追问的 qa_history 与当前问题）。
+    """
+    concept = get_concept(concept_id)
+    if concept is None:
+        raise SessionError(f"concept {concept_id} not found")
+
+    session = LearningSession(
+        concept["title"],
+        concept.get("source_text") or "",
+        client=client,
+    )
+    session.concept_id = concept_id
+
+    # 通用部分：重建旧流程追问历史（新流程里同样作为补充上下文）
+    history = get_qa_history(concept_id)
+    for qa in history:
+        session.qa_history.append(
+            {
+                "question": qa["question"],
+                "answer": qa.get("user_answer"),
+                "is_correct": bool(qa.get("is_correct")),
+                "hint": None,
+            }
+        )
+    if history:
+        session.layer = min(MAX_LAYER, len(history))
+        session._current_question = history[-1]["question"]
+
+    # 新流程部分：带 stage / validation_type 标记 → 恢复完整新流程状态
+    stage = concept.get("stage")
+    if stage is not None or concept.get("validation_type") is not None:
+        session.flow = "new"
+        session.stage = stage if stage is not None else "reading"
+        session.text_type = concept.get("validation_type")
+        session.validation_task = concept.get("validation_task")
+        session.validation_target = concept.get("validation_target")
+        session.validation_passed = bool(concept.get("validation_passed"))
+        session.validation_attempts = int(concept.get("validation_attempts") or 0)
+        session.needs_relearning = bool(concept.get("needs_relearning"))
+        session.validation_history = _load_json_list(concept.get("validation_history"))
+        session.deeper_questions = _load_json_list(concept.get("deeper_questions"))
+        session.deeper_history = _load_json_list(concept.get("deeper_answers"))
+        session.current_deeper_index = int(concept.get("deeper_index") or 0)
+        if session.stage == "complete":
+            session.phase = "connections"
+        elif session.stage == "deepening":
+            # 恢复「屏幕上那道深化问题」：若最后一道已被回答过，则留空让 UI
+            # 生成下一道；否则把它还原到屏幕上让用户继续作答。
+            last_generated = (
+                session.deeper_questions[-1] if session.deeper_questions else None
+            )
+            answered = (
+                session.deeper_history[-1]["question"]
+                if session.deeper_history
+                else None
+            )
+            session._current_deeper_question = (
+                last_generated if last_generated is not None and answered != last_generated else None
+            )
+    return session
+
+
 __all__ = [
     "LearningSession",
     "SessionError",
     "warmup_concept",
+    "restore_session",
     "VALIDATION_MAX_ATTEMPTS",
     "MAX_LAYER",
 ]

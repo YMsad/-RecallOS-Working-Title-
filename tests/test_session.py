@@ -12,7 +12,12 @@ from core import database
 from core.client import DeepSeekClient
 from core.config import Settings
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
-from core.session import LearningSession, SessionError, warmup_concept
+from core.session import (
+    LearningSession,
+    SessionError,
+    restore_session,
+    warmup_concept,
+)
 
 TEST_SETTINGS = Settings(
     deepseek_api_key="test-key",
@@ -622,3 +627,131 @@ def test_submit_deeper_answer_requires_open_question() -> None:
     session.start()
     with pytest.raises(SessionError):
         session.submit_deeper_answer("x")
+
+
+# ------------------------------------------------------- V0.3.0 session restore
+
+
+def test_restore_legacy_flow_rebuilds_qa_history() -> None:
+    """旧流程启动的概念（无 stage/validation_type 标记）恢复后仍是旧流程。"""
+    session, _ = make_session(text_reply("Q1"), judge(True, "对"), text_reply("Q2"))
+    session.start()
+    session.submit_answer("答")
+    assert database.get_concept(session.concept_id)["stage"] is None
+
+    restored = restore_session(session.concept_id)
+    assert restored.flow == "legacy"
+    assert restored.concept_id == session.concept_id
+    assert len(restored.qa_history) == 1
+    assert restored.layer == 1
+    assert restored._current_question == "Q1"
+
+
+def test_restore_new_flow_reading_stage() -> None:
+    session, _ = make_session()
+    cid = session.begin()
+    assert database.get_concept(cid)["stage"] == "reading"
+
+    restored = restore_session(cid)
+    assert restored.flow == "new"
+    assert restored.stage == "reading"
+    assert restored.concept_id == cid
+    assert restored.title == "机会成本"
+
+
+def test_restore_new_flow_validation_preserves_attempts_and_task() -> None:
+    session, _ = make_session(
+        validation_task_reply("用一句话向朋友解释机会成本", "关键点：放弃的次优价值"),
+        validate_reply(False, "再想想", "缺关键点1"),
+        validate_reply(False, "再想想", "缺关键点2"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答1")
+    session.submit_validation("回答2")
+    assert session.stage == "validation"
+    assert session.validation_attempts == 2
+
+    restored = restore_session(cid)
+    assert restored.flow == "new"
+    assert restored.stage == "validation"
+    assert restored.validation_task == "用一句话向朋友解释机会成本"
+    assert restored.validation_target == "关键点：放弃的次优价值"
+    assert restored.validation_attempts == 2
+    assert restored.needs_relearning is False
+    assert len(restored.validation_history) == 2
+    assert restored.validation_history[0]["answer"] == "回答1"
+    assert restored.validation_history[1]["passed"] is False
+
+
+def test_restore_new_flow_deepening_restores_unanswered_question() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务", "目标"),
+        validate_reply(True, "通过"),
+        text_reply("深化问题一"),
+        text_reply("深化问题二"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("机会成本是我放弃的次优选择")
+    session.next_deeper_question()  # 深化问题一
+    session.submit_deeper_answer("我的思考一")
+    session.next_deeper_question()  # 深化问题二（尚未回答）
+    assert session.stage == "deepening"
+    assert session.current_deeper_index == 2
+
+    restored = restore_session(cid)
+    assert restored.flow == "new"
+    assert restored.stage == "deepening"
+    assert restored.current_deeper_index == 2
+    assert restored._current_deeper_question == "深化问题二"
+    assert len(restored.deeper_history) == 1
+
+
+def test_restore_new_flow_deepening_last_answered_has_no_open_question() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务", "目标"),
+        validate_reply(True, "通过"),
+        text_reply("深化问题一"),
+        text_reply("深化问题二"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("答案")
+    session.next_deeper_question()
+    session.submit_deeper_answer("思考一")
+    session.next_deeper_question()
+    session.submit_deeper_answer("思考二")
+
+    restored = restore_session(cid)
+    assert restored.stage == "deepening"
+    assert restored._current_deeper_question is None
+    assert len(restored.deeper_questions) == 2
+
+
+def test_restore_new_flow_complete_sets_connections_phase() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务", "目标"),
+        validate_reply(True, "通过"),
+        text_reply("再验证问题"),
+        text_reply("联系问题"),
+        text_reply("反事实问题"),
+        text_reply("行动问题"),
+        text_reply("第一性原理问题"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("答案")
+    for _ in range(5):
+        assert session.next_deeper_question() is not None
+    assert session.next_deeper_question() is None  # 深化全部完成
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+
+    restored = restore_session(cid)
+    assert restored.flow == "new"
+    assert restored.stage == "complete"
+    assert restored.phase == "connections"
+    assert restored.current_deeper_index == 5
+    assert len(restored.deeper_questions) == 5
+    assert restored.next_deeper_question() is None

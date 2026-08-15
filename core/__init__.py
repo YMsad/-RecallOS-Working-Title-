@@ -73,6 +73,7 @@ from core.session import (
     VALIDATION_MAX_ATTEMPTS,
     LearningSession,
     SessionError,
+    restore_session,
     warmup_concept,
 )
 
@@ -131,6 +132,7 @@ __all__ = [
     "DEEPER_QUESTION_ORDER",
     "LearningSession",
     "SessionError",
+    "restore_session",
     "warmup_concept",
     "MAX_LAYER",
     "VALIDATION_MAX_ATTEMPTS",

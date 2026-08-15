@@ -42,7 +42,7 @@ from core.database import (
     set_setting,
 )
 from core.models import MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
-from core.session import MAX_LAYER
+from core.session import MAX_LAYER, restore_session
 
 MASTERY_LABELS = {
     MASTERY_UNDERSTOOD: "✅ 搞懂了",
@@ -89,26 +89,67 @@ def _navigate(target: str) -> None:
 
 
 def _resume_learning(concept: dict) -> None:
-    """V0.2.3 — 从数据库恢复未完成的学习会话（重建 session 与 messages）。"""
-    session = LearningSession(concept["title"], concept.get("source_text") or "")
-    session.concept_id = concept["id"]
-    history = get_qa_history(concept["id"])
+    """V0.3.0 — 从数据库恢复未完成的学习会话。
+
+    - 概念带新流程标记（stage/validation_type 非空）→ 用 ``restore_session``
+      恢复完整的「阅读→验证→深化」状态与对话气泡；
+    - 否则走 V0.2.3 的旧流程恢复（重建 session 与 messages）。
+    """
+    is_new_flow = bool(concept.get("stage") or concept.get("validation_type"))
+    if not is_new_flow:
+        session = LearningSession(concept["title"], concept.get("source_text") or "")
+        session.concept_id = concept["id"]
+        history = get_qa_history(concept["id"])
+        messages: list[dict] = []
+        for qa in history:
+            messages.append({"role": "assistant", "text": qa["question"]})
+            if qa.get("user_answer"):
+                messages.append({"role": "user", "text": qa["user_answer"]})
+            session.qa_history.append(
+                {
+                    "question": qa["question"],
+                    "answer": qa.get("user_answer"),
+                    "is_correct": bool(qa.get("is_correct")),
+                    "hint": None,
+                }
+            )
+        if history:
+            session.layer = min(MAX_LAYER, len(history))
+            session._current_question = history[-1]["question"]
+        st.session_state.session = session
+        st.session_state.messages = messages
+        st.session_state.step = "learning"
+        st.rerun()
+        return
+
+    # ---- V0.3.0 新流程恢复 ----
+    session = restore_session(concept["id"])
     messages: list[dict] = []
-    for qa in history:
-        messages.append({"role": "assistant", "text": qa["question"]})
-        if qa.get("user_answer"):
-            messages.append({"role": "user", "text": qa["user_answer"]})
-        session.qa_history.append(
-            {
-                "question": qa["question"],
-                "answer": qa.get("user_answer"),
-                "is_correct": bool(qa.get("is_correct")),
-                "hint": None,
-            }
+    if session.validation_task:
+        messages.append(
+            {"role": "assistant", "text": f"📝 验证你的理解：\n\n{session.validation_task}"}
         )
-    if history:
-        session.layer = min(MAX_LAYER, len(history))
-        session._current_question = history[-1]["question"]
+    for entry in session.validation_history:
+        messages.append({"role": "user", "text": entry.get("answer", "")})
+        feedback = entry.get("feedback") or ""
+        if entry.get("passed"):
+            messages.append({"role": "assistant", "text": f"✅ {feedback}"})
+        else:
+            tail = ""
+            if entry.get("missing"):
+                tail = f"\n\n💡 还差一点点：{entry['missing']}"
+            messages.append({"role": "assistant", "text": f"🤔 {feedback}{tail}"})
+    for qa in session.deeper_history:
+        messages.append(
+            {"role": "assistant", "text": f"🔍 深化追问：\n\n{qa['question']}"}
+        )
+        messages.append({"role": "user", "text": qa.get("answer", "")})
+    if session.stage == "deepening" and session._current_deeper_question:
+        st.session_state["v_deeper_question"] = session._current_deeper_question
+        messages.append(
+            {"role": "assistant",
+             "text": f"🔍 深化追问（第 {session.current_deeper_index}/{len(DEEPER_QUESTION_ORDER)} 问）：\n\n{session._current_deeper_question}"}
+        )
     st.session_state.session = session
     st.session_state.messages = messages
     st.session_state.step = "learning"
@@ -344,6 +385,8 @@ def _render_learning_new(session: LearningSession) -> None:
         st.markdown("### 📝 验证你的理解")
         with st.expander("📄 再看一眼原文"):
             st.markdown(session.source_text or "（没有粘贴原文）")
+        if session.validation_task:
+            st.markdown(session.validation_task)
 
         if st.button("😵 我看不懂，帮我解释", key="v_explain_btn"):
             try:
