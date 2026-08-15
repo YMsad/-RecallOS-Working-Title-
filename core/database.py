@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
 
-from core.config import PROJECT_ROOT
+from core.config import get_data_dir
 from core.models import (
     MASTERY_LEARNING,
     MASTERY_UNCLEAR,
@@ -22,7 +22,7 @@ from core.models import (
     MASTERY_VALUES,
 )
 
-DB_PATH: Path = PROJECT_ROOT / "data" / "recallos.db"
+DB_PATH: Path = get_data_dir() / "recallos.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS concepts (

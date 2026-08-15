@@ -4,6 +4,7 @@ and a user-level config file (~/.recallos/config.json)."""
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,23 @@ ENV_FILE = PROJECT_ROOT / ".env"
 # User-level API key storage (fallback when .env has no DEEPSEEK_API_KEY).
 CONFIG_DIR = Path.home() / ".recallos"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def is_frozen() -> bool:
+    """True when running inside a PyInstaller bundle."""
+    return getattr(sys, "frozen", False)
+
+
+def get_data_dir() -> Path:
+    """Data directory for the SQLite database.
+
+    Normal runs keep data under the project (``data/``); when frozen by
+    PyInstaller (onefile extracts to a temp dir that vanishes on exit) the
+    database would be lost, so it moves to the user profile instead.
+    """
+    if is_frozen():
+        return CONFIG_DIR / "data"
+    return PROJECT_ROOT / "data"
 
 
 def get_api_key_from_config() -> str:
