@@ -585,6 +585,36 @@ def test_app_delete_from_detail_page_returns_to_history(configured_app) -> None:
     assert database.get_concept(shown) is None
 
 
+def test_app_history_view_expands_inline_and_collapses(configured_app) -> None:
+    """「查看」在概念行下方行内展开详情；一次只展开一个；再次点击可收起。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.update_concept(b, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 首次进入默认展开第一个概念，行内只渲染一个展开区（一个「关闭」按钮）
+    assert "history_view_id" in at.session_state
+    assert at.session_state["history_view_id"] in (a, b)
+    assert any("关闭" in (btn.label or "") for btn in at.button)
+    # 点击「查看」切换展开到 b（一次只展开一个）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+    assert any("关闭" in (btn.label or "") for btn in at.button)
+    # 再次点击当前展开概念的「查看」→ 收起（不会被自动重新展开）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] is None
+    assert not any("关闭" in (btn.label or "") for btn in at.button)
+    # 可再点开另一个概念
+    at = at.button(key=f"view_{a}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == a
+
+
 # ---------------------------------------------------------------- V0.3.0 UI
 
 

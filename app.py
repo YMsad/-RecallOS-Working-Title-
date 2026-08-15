@@ -860,7 +860,16 @@ def _render_concept_detail_with_edit_button(concept: dict) -> None:
 
 # ---- 历史页按钮使用 on_click 回调（事件由服务端处理，不依赖按钮返回值的 rerun 触发）----
 def _select_history_concept(cid: int) -> None:
-    st.session_state.history_view_id = cid
+    # 再次点击当前展开的概念即收起；一次只展开一个
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
+    else:
+        st.session_state.history_view_id = cid
+
+
+def _collapse_history_detail(cid: int) -> None:
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
 
 
 def _request_delete_concept(cid: int) -> None:
@@ -882,6 +891,65 @@ def _confirm_delete_concept(cid: int) -> None:
         st.session_state.step = "history"
 
 
+def _render_history_inline_detail(concept: dict) -> None:
+    """V0.3.0 — 历史页「查看」选中的概念，详情行内展开（紧跟该概念行）。"""
+    # ---- V0.2.3: 「我的理解」编辑功能（仅在有内容时显示）----
+    if concept.get("user_definition"):
+        edit_key = f"edit_def_{concept['id']}"
+        if st.session_state.get(edit_key) is not None:
+            # 编辑模式
+            edited = st.text_area(
+                "我的理解",
+                value=st.session_state[edit_key],
+                key=edit_key,
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("保存", key=f"save_{edit_key}"):
+                    database.update_concept(
+                        concept["id"], user_definition=edited.strip()
+                    )
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+            with c2:
+                if st.button("取消", key=f"cancel_{edit_key}"):
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+        else:
+            # 初始状态：显示用户理解和编辑按钮
+            st.markdown(f"**我的理解：**{concept['user_definition']}")
+            if st.button("✏️ 编辑", key=f"edit_def_{concept['id']}"):
+                st.session_state[edit_key] = concept["user_definition"]
+                st.rerun()
+    else:
+        # 无 user_definition：仅正常显示详情（不带编辑入口）
+        _render_concept_detail_without_edit(concept)
+    # ---- 结束 V0.2.3 ----
+
+    # V0.3.0 — 有「我的理解」的新流程概念在这个分支不渲染 format_detail，
+    # 因此在这里补齐它的验证/深化记录显示（旧流程保持原样不变）。
+    if concept.get("validation_type") and concept.get("user_definition"):
+        st.markdown("### 追问记录")
+        st.markdown("\n".join(_new_flow_records_lines(concept)))
+
+    conns = get_connections(concept["id"])
+    if conns:
+        st.markdown("### 🔗 从连接跳转")
+        for conn in conns:
+            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
+            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_{concept['id']}_{conn['id']}"):
+                st.session_state.concept_detail_id = other_id
+                _navigate("concept_detail")
+
+    st.button(
+        "关闭",
+        key=f"close_{concept['id']}",
+        on_click=_collapse_history_detail,
+        args=(concept["id"],),
+    )
+
+
 def render_history() -> None:
     st.markdown("## 📚 我的知识")
     concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
@@ -891,9 +959,10 @@ def render_history() -> None:
             go_home()
         return
 
-    # 默认查看第一个概念（保持详情可直达）
-    if st.session_state.get("history_view_id") is None:
+    # 默认展开第一个概念（仅在首次进入历史页时；用户主动收起后不再自动展开）
+    if "history_init" not in st.session_state:
         st.session_state.history_view_id = concepts[0]["id"]
+        st.session_state.history_init = True
 
     # ---- V0.2.3: 三个独立表格，按掌握度分组（概念名称 / 操作，行内用分割线分隔）----
     for group_key in _MASTERY_ORDER:
@@ -950,66 +1019,12 @@ def render_history() -> None:
                             on_click=_cancel_delete_concept,
                             args=(c["id"],),
                         )
+                # 行内展开：被「查看」选中的概念，详情紧跟当前行下方显示
+                if c["id"] == st.session_state.get("history_view_id"):
+                    st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
+                    _render_history_inline_detail(c)
                 if i < len(group) - 1:
                     st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
-
-    st.divider()
-
-    concept = next(
-        (c for c in concepts if c["id"] == st.session_state.get("history_view_id")), None
-    )
-    if concept is None:
-        st.caption("点击上方「查看」按钮查看概念详情。")
-        return
-
-    # ---- V0.2.3: 「我的理解」编辑功能（仅在有内容时显示）----
-    if concept.get("user_definition"):
-        edit_key = f"edit_def_{concept['id']}"
-        if st.session_state.get(edit_key) is not None:
-            # 编辑模式
-            edited = st.text_area(
-                "我的理解",
-                value=st.session_state[edit_key],
-                key=edit_key,
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("保存", key=f"save_{edit_key}"):
-                    database.update_concept(
-                        concept["id"], user_definition=edited.strip()
-                    )
-                    st.session_state.pop(edit_key, None)
-                    st.rerun()
-            with c2:
-                if st.button("取消", key=f"cancel_{edit_key}"):
-                    st.session_state.pop(edit_key, None)
-                    st.rerun()
-        else:
-            # 初始状态：显示用户理解和编辑按钮
-            st.markdown(f"**我的理解：**{concept['user_definition']}")
-            if st.button("✏️ 编辑", key=f"edit_def_{concept['id']}"):
-                st.session_state[edit_key] = concept["user_definition"]
-                st.rerun()
-    else:
-        # 无 user_definition：仅正常显示详情（不带编辑入口）
-        _render_concept_detail_without_edit(concept)
-    # ---- 结束 V0.2.3 ----
-
-    # V0.3.0 — 有「我的理解」的新流程概念在这个分支不渲染 format_detail，
-    # 因此在这里补齐它的验证/深化记录显示（旧流程保持原样不变）。
-    if concept.get("validation_type") and concept.get("user_definition"):
-        st.markdown("### 追问记录")
-        st.markdown("\n".join(_new_flow_records_lines(concept)))
-
-    conns = get_connections(concept["id"])
-    if conns:
-        st.markdown("### 🔗 从连接跳转")
-        for conn in conns:
-            other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
-            other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
-            if st.button(f"去往「{other_title}」", key=f"hist_jump_{concept['id']}_{conn['id']}"):
-                st.session_state.concept_detail_id = other_id
-                _navigate("concept_detail")
 
 
 # ---------------------------------------------------------------------- main
