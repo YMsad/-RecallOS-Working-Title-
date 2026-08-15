@@ -725,3 +725,106 @@ def test_app_continue_new_flow_resumes_deepening(configured_app) -> None:
     assert at.session_state["v_deeper_question"] == "深化问题一：如果不考虑机会成本会怎样？"
     assert any("深化问题一" in m["text"] for m in at.session_state["messages"])
     assert any("当前阶段: 🔍 深化追问" in (i.value or "") for i in at.info)
+
+
+# ------------------------------------------------- V0.3.0 history dual-flow
+
+
+def _seed_new_flow_finished_concept() -> int:
+    """Create a finished V0.3.0 new-flow concept with validation + deepening data."""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.update_concept(
+        cid,
+        mastery="搞懂了",
+        user_definition="机会成本是放弃的次优选择",
+        validation_type="definition",
+        validation_task="用一句话向朋友解释机会成本",
+        validation_target="说出被放弃的次优选择",
+        validation_passed=True,
+        validation_attempts=2,
+        validation_history=json.dumps(
+            [
+                {"answer": "第一次答错", "passed": False, "feedback": "再想想", "missing": "缺关键点"},
+                {"answer": "机会成本是我放弃的次优选择", "passed": True, "feedback": "很好"},
+            ],
+            ensure_ascii=False,
+        ),
+        deeper_questions=json.dumps(
+            ["深化一：如果不考虑机会成本会怎样？", "深化二：机会成本和沉没成本什么关系？"],
+            ensure_ascii=False,
+        ),
+        deeper_answers=json.dumps(
+            [
+                {"question": "深化一：如果不考虑机会成本会怎样？", "answer": "决策会失真"},
+                {"question": "深化二：机会成本和沉没成本什么关系？", "answer": "两者都关于选择"},
+            ],
+            ensure_ascii=False,
+        ),
+        deeper_index=2,
+    )
+    return cid
+
+
+def test_app_history_shows_new_flow_validation_and_deepening(configured_app) -> None:
+    """有「我的理解」的新流程概念：历史页应显示验证任务/作答/结果与深化追问。"""
+    _seed_new_flow_finished_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "用一句话向朋友解释机会成本" in text       # 验证任务
+    assert "第一次答错" in text                      # 第 1 次作答
+    assert "机会成本是我放弃的次优选择" in text       # 第 2 次作答
+    assert "✅ 通过" in text                          # 验证结果
+    assert "深化一：如果不考虑机会成本会怎样？" in text
+    assert "决策会失真" in text                       # 深化回答
+    assert "我的回答：两者都关于选择" in text
+
+
+def test_app_history_shows_new_flow_unfinished_without_definition(configured_app) -> None:
+    """尚无 user_definition 的新流程概念：走 format_detail 也应显示验证/深化记录。"""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.update_concept(
+        cid,
+        validation_type="definition",
+        validation_task="解释一下机会成本",
+        validation_passed=False,
+        validation_attempts=2,
+        needs_relearning=True,
+        validation_history=json.dumps(
+            [{"answer": "答错", "passed": False, "feedback": "再想想", "missing": "缺"}],
+            ensure_ascii=False,
+        ),
+        deeper_questions=json.dumps(["不学机会成本会怎样？"], ensure_ascii=False),
+        deeper_answers=json.dumps([]),
+        deeper_index=1,
+    )
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "解释一下机会成本" in text
+    assert "❌ 未通过（连续 3 次，需要重新学习）" in text
+    assert "不学机会成本会怎样？" in text
+    assert "（未回答）" in text
+
+
+def test_app_history_legacy_qa_records_still_shown(configured_app) -> None:
+    """旧流程概念（无 validation_type）：历史页追问记录仍来自 qa_records。"""
+    cid = database.save_concept("机会成本", "原文")
+    database.save_qa(cid, "它关注过去还是未来？", "未来", True)
+    database.save_qa(cid, "和沉没成本的区别？", "一个看过去", False, hint_used=True)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "它关注过去还是未来？" in text
+    assert "和沉没成本的区别？" in text
+    assert "一个看过去" in text
+    assert "（用过提示）" in text

@@ -5,6 +5,7 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import json
 import os
 
 import pandas as pd
@@ -671,14 +672,20 @@ def render_summary() -> None:
 
 # ------------------------------------------------------------------ history
 
-def format_detail(concept: dict) -> str:
-    lines = [f"# {concept['title']}  {MASTERY_LABELS.get(concept['mastery'], concept['mastery'])}"]
-    if concept.get("user_definition"):
-        lines.append(f"\n**我的理解：**{concept['user_definition']}")
-    if concept.get("source_text"):
-        lines.append(f"\n**来源：**{concept['source_text']}")
+def _load_json_list(raw) -> list:
+    """Parse a JSON-list column value; return [] for empty/invalid content."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
 
-    lines.append("\n## 追问记录")
+
+def _legacy_records_lines(concept: dict) -> list[str]:
+    """旧流程（V0.3.0 之前）的学习记录：qa_records 表里的逐层追问。"""
+    lines: list[str] = []
     history = get_qa_history(concept["id"])
     if not history:
         lines.append("（无）")
@@ -687,6 +694,66 @@ def format_detail(concept: dict) -> str:
         hint = "（用过提示）" if qa["hint_used"] else ""
         lines.append(f"\n**Q{i}** {qa['question']}")
         lines.append(f"   {qa['user_answer']} {mark}{hint}")
+    return lines
+
+
+def _new_flow_records_lines(concept: dict) -> list[str]:
+    """V0.3.0 — 新流程（阅读→验证→深化）的学习记录。
+
+    验证任务与历史作答存在 concepts 表的 validation_* 字段，
+    深化追问存在 deeper_questions / deeper_answers 字段（JSON）。
+    """
+    lines: list[str] = []
+
+    task = concept.get("validation_task")
+    if task:
+        lines.append(f"**验证任务：**{task}")
+        for i, e in enumerate(_load_json_list(concept.get("validation_history")), 1):
+            mark = "✅ 通过" if e.get("passed") else "❌ 未通过"
+            lines.append(f"- 第 {i} 次：{e.get('answer') or ''}（{mark}）")
+        if concept.get("validation_passed"):
+            result = "✅ 通过"
+        elif concept.get("needs_relearning"):
+            result = "❌ 未通过（连续 3 次，需要重新学习）"
+        else:
+            result = "⏳ 进行中"
+        lines.append(f"**验证结果：**{result}")
+    else:
+        lines.append("**验证任务：**（尚未开始）")
+
+    deeper_qs = _load_json_list(concept.get("deeper_questions"))
+    if deeper_qs:
+        ans_by_q = {
+            e.get("question"): e.get("answer")
+            for e in _load_json_list(concept.get("deeper_answers"))
+        }
+        lines.append("**深化追问：**")
+        for i, q in enumerate(deeper_qs, 1):
+            lines.append(f"- 🔍 {i}. {q}")
+            lines.append(f"  我的回答：{ans_by_q.get(q) or '（未回答）'}")
+    else:
+        lines.append("**深化追问：**（尚未开始）")
+
+    return lines
+
+
+def _records_lines(concept: dict) -> list[str]:
+    """学习记录双流程支持：有新流程标记（validation_type 非空）显示验证+深化，
+    否则回退旧的 qa_records 显示。"""
+    if concept.get("validation_type"):
+        return _new_flow_records_lines(concept)
+    return _legacy_records_lines(concept)
+
+
+def format_detail(concept: dict) -> str:
+    lines = [f"# {concept['title']}  {MASTERY_LABELS.get(concept['mastery'], concept['mastery'])}"]
+    if concept.get("user_definition"):
+        lines.append(f"\n**我的理解：**{concept['user_definition']}")
+    if concept.get("source_text"):
+        lines.append(f"\n**来源：**{concept['source_text']}")
+
+    lines.append("\n## 追问记录")
+    lines.extend(_records_lines(concept))
 
     lines.append("\n## 知识连接")
     conns = get_connections(concept["id"])
@@ -867,6 +934,12 @@ def render_history() -> None:
         # 无 user_definition：仅正常显示详情（不带编辑入口）
         _render_concept_detail_without_edit(concept)
     # ---- 结束 V0.2.3 ----
+
+    # V0.3.0 — 有「我的理解」的新流程概念在这个分支不渲染 format_detail，
+    # 因此在这里补齐它的验证/深化记录显示（旧流程保持原样不变）。
+    if concept.get("validation_type") and concept.get("user_definition"):
+        st.markdown("### 追问记录")
+        st.markdown("\n".join(_new_flow_records_lines(concept)))
 
     conns = get_connections(concept["id"])
     if conns:
