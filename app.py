@@ -65,7 +65,8 @@ _NEW_FLOW = os.environ.get("RECALLOS_NEW_FLOW", "1").lower() in (
 STAGE_LABELS = {
     "reading": "📖 阅读中",
     "validation": "🧠 验证理解",
-    "deepening": "🔍 深化追问",
+    "offer": "💬 是否深入?",
+    "intervention": "💡 最小干预",
     "complete": "✅ 已完成",
     "relearn": "🔄 需要重新学习",
 }
@@ -130,7 +131,7 @@ def _resume_learning(concept: dict) -> None:
         st.rerun()
         return
 
-    # ---- V0.3.0 新流程恢复 ----
+    # ---- V0.3.0 新流程恢复（Learning Loop v2）----
     session = restore_session(concept["id"])
     messages: list[dict] = []
     if session.validation_task:
@@ -139,30 +140,21 @@ def _resume_learning(concept: dict) -> None:
         )
     for entry in session.validation_history:
         messages.append({"role": "user", "text": entry.get("answer", "")})
-        feedback = entry.get("feedback") or ""
-        if entry.get("passed"):
-            messages.append({"role": "assistant", "text": f"✅ {feedback}"})
-        else:
-            tail = ""
-            if entry.get("missing"):
-                tail = f"\n\n💡 还差一点点：{entry['missing']}"
-            messages.append({"role": "assistant", "text": f"🤔 {feedback}{tail}"})
+        level = entry.get("understanding_level") or "surface"
+        messages.append(
+            {"role": "assistant", "text": f"✅ 已分析你的理解（层级：{level}）"}
+        )
     for qa in session.deeper_history:
-        messages.append(
-            {"role": "assistant", "text": f"🔍 深化追问：\n\n{qa['question']}"}
-        )
+        messages.append({"role": "assistant", "text": qa["question"]})
         messages.append({"role": "user", "text": qa.get("answer", "")})
-    if session.stage == "deepening" and session._current_deeper_question:
-        st.session_state["v_deeper_question"] = session._current_deeper_question
-        messages.append(
-            {"role": "assistant",
-             "text": f"🔍 深化追问（第 {session.current_deeper_index}/{len(DEEPER_QUESTION_ORDER)} 问）：\n\n{session._current_deeper_question}"}
-        )
+    if session.stage == "offer":
+        messages.append({"role": "assistant", "text": "✅ 你已经理解核心概念。"})
     st.session_state.session = session
     st.session_state.messages = messages
     # 清理旧的 AI 错误/重试状态，避免恢复会话时卡在重试界面
     st.session_state.pop("v_pending_answer", None)
     st.session_state.pop("v_ai_error", None)
+    st.session_state.pop("v_offer", None)
     st.session_state.step = "learning"
     st.rerun()
 
@@ -379,7 +371,9 @@ _PENDING_SPINNERS = {
     "start_validation": "AI 正在设计验证任务…",
     "start_validation_again": "AI 正在设计验证任务…",
     "ask_simplify": "生成大白话解释…",
-    "submit_validation": "AI 正在判断…",
+    "submit_validation": "AI 正在分析你的理解…",
+    "choose_deepening": "AI 正在找下一个理解缺口…",
+    "submit_intervention": "AI 正在更新你的理解状态…",
 }
 
 
@@ -402,18 +396,42 @@ def _run_pending(session: LearningSession) -> None:
             elif action == "submit_validation":
                 answer = st.session_state.get("v_pending_answer")
                 if not answer:
-                    raise SessionError("缺少待判断的答案")
+                    raise SessionError("缺少待分析的答案")
                 result = session.submit_validation(answer)
-                if result["passed"]:
-                    reply = f"✅ {result['feedback']}"
-                else:
-                    reply = f"🤔 {result['feedback']}"
-                    if result.get("missing"):
-                        reply += f"\n\n💡 还差一点点：{result['missing']}"
-                    if result.get("needs_relearning"):
-                        reply += "\n\n📖 连续 3 次没有通过验证，建议回看原文再试。"
                 st.session_state.pop("v_pending_answer", None)
-                st.session_state.messages.append({"role": "assistant", "text": reply})
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "offer":
+                    st.session_state.messages.append(
+                        {"role": "assistant",
+                         "text": f"✅ 你已经理解核心概念（层级：{result['understanding_level']}）。"})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
+            elif action == "choose_deepening":
+                result = session.choose_deepening(True)
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
+            elif action == "submit_intervention":
+                answer = st.session_state.get("v_pending_answer")
+                if not answer:
+                    raise SessionError("缺少待分析的答案")
+                result = session.submit_intervention_answer(answer)
+                st.session_state.pop("v_pending_answer", None)
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
         st.session_state.pop("pending_action", None)
     except DeepSeekAuthError:
         st.session_state.pop("pending_action", None)
@@ -421,12 +439,8 @@ def _run_pending(session: LearningSession) -> None:
         st.session_state.messages.append({"role": "assistant", "text": "❌ Key 无效，请重新输入"})
     except (DeepSeekError, SessionError) as exc:
         st.session_state.pop("pending_action", None)
-        if action == "submit_validation":
-            # 超时/网络失败：缓存住答案，展示「重试/跳过」，不让用户干等
-            st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
-        else:
-            st.session_state.messages.append(
-                {"role": "assistant", "text": f"❌ {exc}\n\n再点一次即可重试。"})
+        st.session_state.messages.append(
+            {"role": "assistant", "text": f"❌ {exc}\n\n再试一次即可重试。"})
     except Exception as exc:  # noqa: BLE001 —— 兜底：任何异常都转成可重试提示，杜绝转圈卡死
         logger.exception("_run_pending[%s] 意外失败", action)
         st.session_state.pop("pending_action", None)
@@ -464,32 +478,7 @@ def _render_learning_new(session: LearningSession) -> None:
             st.session_state["pending_action"] = "ask_simplify"
             st.rerun()
 
-        pending = st.session_state.get("v_pending_answer")
-        if pending is not None:
-            # 上次 AI 判断失败：展示错误，让用户主动选「重试」或「跳过」，不再自动转圈
-            st.error("AI 判断失败：暂时连不上 DeepSeek。请重试，或先跳过本轮验证。")
-            render_messages()
-            c_retry, c_skip = st.columns(2)
-            with c_retry:
-                if st.button("🔄 重试判断", key="v_retry_judge"):
-                    st.session_state["pending_action"] = "submit_validation"
-                    st.rerun()
-            with c_skip:
-                if st.button("⏭ 跳过判断，视为通过", key="v_skip_judge"):
-                    try:
-                        session.force_validation_pass()
-                    except SessionError as exc:
-                        st.session_state.messages.append(
-                            {"role": "assistant", "text": f"❌ {exc}"})
-                    else:
-                        st.session_state.messages.append(
-                            {"role": "assistant",
-                             "text": "⏭ 已跳过本轮验证，进入深化追问。"})
-                    st.session_state.pop("v_pending_answer", None)
-                    st.rerun()
-            return
-
-        answer = st.chat_input("你的回答…")
+        answer = st.chat_input("合上原文，用自己的话把这件事讲清楚…")
         if answer:
             st.session_state.messages.append({"role": "user", "text": answer})
             st.session_state["v_pending_answer"] = answer
@@ -498,31 +487,21 @@ def _render_learning_new(session: LearningSession) -> None:
         render_messages()
         return
 
-    if stage == "deepening":
-        question = st.session_state.get("v_deeper_question")
-        # AI 生成失败后不再自动重试（避免每次 rerun 都转圈），改由用户手动「重试/跳过」
-        if question is None and st.session_state.get("v_ai_error"):
-            st.error(f"AI 生成问题失败：{st.session_state['v_ai_error']}")
-            render_messages()
-            c_retry, c_skip = st.columns(2)
-            with c_retry:
-                if st.button("🔄 重试", key="v_retry_deeper"):
+    if stage == "offer":
+        # 深入不是默认行为：先请用户自己决定是否继续
+        offer_text = st.session_state.get("v_offer")
+        if offer_text is None:
+            error = st.session_state.get("v_ai_error")
+            if error:
+                st.error(f"AI 生成深入邀请失败：{error}")
+                render_messages()
+                if st.button("🔄 重试", key="v_retry_offer"):
                     st.session_state.pop("v_ai_error", None)
                     st.rerun()
-            with c_skip:
-                if st.button("⏭ 跳过深化，进入总结", key="v_skip_deeper"):
-                    session.finish_deepening()
-                    st.session_state.pop("v_ai_error", None)
-                    st.session_state.pop("v_deeper_question", None)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "text": "⏭ 已跳过剩余的深化追问。"})
-                    st.rerun()
-            return
-
-        if question is None:
+                return
             try:
-                with st.spinner("AI 正在出下一道更难的问题…"):
-                    question = session.next_deeper_question()
+                with st.spinner("AI 正在准备下一步…"):
+                    offer = session.offer_deepening()
             except DeepSeekAuthError:
                 st.session_state["v_ai_error"] = "Key 无效，请重新输入"
                 st.session_state.messages.append(
@@ -537,49 +516,113 @@ def _render_learning_new(session: LearningSession) -> None:
                 st.rerun()
                 return
             except Exception as exc:  # noqa: BLE001 —— 兜底：不中断页面，转为可重试
-                logger.exception("深化提问生成意外失败")
+                logger.exception("深入邀请生成意外失败")
                 st.session_state["v_ai_error"] = str(exc)
                 st.session_state.messages.append({"role": "assistant", "text": f"❌ 出错了：{exc}"})
                 render_messages()
                 st.rerun()
                 return
-            if question:
+            if offer:
                 st.session_state.pop("v_ai_error", None)
-                total = len(DEEPER_QUESTION_ORDER)
+                st.session_state["v_offer"] = offer["offer"]
                 st.session_state.messages.append(
-                    {"role": "assistant",
-                     "text": f"🔍 深化追问（第 {session.current_deeper_index}/{total} 问）：\n\n{question}"})
-                st.session_state["v_deeper_question"] = question
+                    {"role": "assistant", "text": f"🎯 {offer['offer']}"})
                 st.rerun()
+                return
 
-        if question is None:
-            st.success("🎉 所有深化追问都完成啦！")
+        if offer_text is None:
+            st.success("✅ 理解这一步已经完成。")
             render_messages()
-            if st.button("进入总结", type="primary", use_container_width=True, key="v_finish"):
-                st.session_state.pop("v_deeper_question", None)
+            if st.button("进入总结", type="primary", use_container_width=True, key="v_finish_offer"):
+                st.session_state.pop("v_offer", None)
                 _navigate("connections")
             return
 
-        st.markdown("### 🔍 深化追问")
-        st.caption("这些问题没有对错，想到哪说到哪。")
-        answer = st.chat_input("你的思考…")
+        st.markdown("### 💬 继续深入？")
+        with st.expander("🎯 深入邀请"):
+            st.markdown(offer_text)
+        c_go, c_stop = st.columns(2)
+        with c_go:
+            if st.button("🔍 我想再深入一层", use_container_width=True, key="v_go_deeper"):
+                st.session_state.pop("v_offer", None)
+                st.session_state.pop("v_pending_answer", None)
+                st.session_state["pending_action"] = "choose_deepening"
+                st.rerun()
+        with c_stop:
+            if st.button("✅ 先到这里", use_container_width=True, key="v_stop_deeper"):
+                try:
+                    result = session.choose_deepening(False)
+                except SessionError as exc:
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": f"❌ {exc}"})
+                else:
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                st.session_state.pop("v_offer", None)
+                st.rerun()
+        render_messages()
+        return
+
+    if stage == "intervention":
+        st.markdown("### 💡 最小干预")
+        # 屏幕上那道干预未被回答过：AI 自动决策下一条（也用于恢复会话后自动续上）
+        intervention = session.current_intervention()
+        if intervention is None:
+            error = st.session_state.get("v_ai_error")
+            if error:
+                st.error(f"AI 决策干预失败：{error}")
+                render_messages()
+                if st.button("🔄 重试", key="v_retry_intervention"):
+                    st.session_state.pop("v_ai_error", None)
+                    st.rerun()
+                return
+            try:
+                with st.spinner("AI 正在找下一个理解缺口…"):
+                    result = session.next_intervention()
+            except DeepSeekAuthError:
+                st.session_state["v_ai_error"] = "Key 无效，请重新输入"
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+                render_messages()
+                st.rerun()
+                return
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state["v_ai_error"] = str(exc)
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+                render_messages()
+                st.rerun()
+                return
+            except Exception as exc:  # noqa: BLE001 —— 兜底：不中断页面，转为可重试
+                logger.exception("干预决策意外失败")
+                st.session_state["v_ai_error"] = str(exc)
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ 出错了：{exc}"})
+                render_messages()
+                st.rerun()
+                return
+            if result["stage"] == "complete":
+                if result.get("final_note"):
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["final_note"]})
+            else:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": result["bubble"]})
+            st.session_state.pop("v_ai_error", None)
+            st.rerun()
+            return
+
+        st.caption("跟着提示想一想，用自己的话回答就好，不用追求标准答案。")
+        answer = st.chat_input("你的回答…")
         if answer:
             st.session_state.messages.append({"role": "user", "text": answer})
-            try:
-                session.submit_deeper_answer(answer)
-            except SessionError as exc:
-                st.session_state.messages.append(
-                    {"role": "assistant", "text": f"❌ {exc}"})
-            st.session_state.messages.append(
-                {"role": "assistant", "text": "👍 记下来了，继续下一道。"})
-            st.session_state["v_deeper_question"] = None
+            st.session_state["v_pending_answer"] = answer
+            st.session_state["pending_action"] = "submit_intervention"
             st.rerun()
-
         render_messages()
         return
 
     if stage == "complete":
-        st.success("🎉 所有深化追问都完成啦！")
+        st.success("🎉 这一步已经完成啦！")
         render_messages()
         if st.button("进入总结", type="primary", use_container_width=True, key="v_finish"):
             st.session_state.pop("v_deeper_question", None)
@@ -803,8 +846,15 @@ def _new_flow_records_lines(concept: dict) -> list[str]:
     if task:
         lines.append(f"**验证任务：**{task}")
         for i, e in enumerate(_load_json_list(concept.get("validation_history")), 1):
-            mark = "✅ 通过" if e.get("passed") else "❌ 未通过"
-            lines.append(f"- 第 {i} 次：{e.get('answer') or ''}（{mark}）")
+            answer = e.get("answer") or e.get("missing") or ""
+            level = e.get("understanding_level")
+            if level is not None:
+                # Learning Loop v2：答案是学习者的状态快照（无对错）
+                lines.append(f"- 第 {i} 次：{answer}（层级：{level}）")
+            elif e.get("passed"):
+                lines.append(f"- 第 {i} 次：{answer}（✅ 通过）")
+            else:
+                lines.append(f"- 第 {i} 次：{answer}（❌ 未通过）")
         if concept.get("validation_passed"):
             result = "✅ 通过"
         elif concept.get("needs_relearning"):

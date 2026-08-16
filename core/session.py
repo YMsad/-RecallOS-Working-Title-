@@ -26,32 +26,39 @@ from core.database import (
     save_qa,
     update_concept,
 )
+from core.learner_state import LearnerState
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 from core.review import add_to_review_queue
 from core.prompts import (
     DEEPER_QUESTION_ORDER,
     CheckAnswerResult,
     ConnectionSuggestion,
+    DeepeningOffer,
+    Intervention,
+    LearnerStateAnalysis,
+    LearnerStateUpdate,
     SummaryResult,
-    ValidateAnswerResult,
     ValidationTask,
     angle_shift_prompt,
     build_messages,
     check_answer_prompt,
     connections_prompt,
-    deeper_question_prompt,
+    deepening_offer_prompt,
     explain_prompt,
+    intervention_decider_prompt,
+    learner_state_analyzer_prompt,
+    learner_state_updater_prompt,
     opening_question_prompt,
     question_prompt,
     reference_answer_prompt,
     simplify_explanation_prompt,
     simplify_question_prompt,
     summary_prompt,
-    validate_answer_prompt,
     validate_response,
     validate_response_list,
     validation_task_prompt,
     warmup_prompt,
+    _legacy_deeper_question_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +68,22 @@ QUESTION_TEMPERATURE = 0.7
 JUDGE_TEMPERATURE = 0.0
 OTHER_TEMPERATURE = 0.3
 VALIDATION_MAX_ATTEMPTS = 3
+
+_INTERVENTION_ICONS = {
+    "hint": "💡",
+    "example": "🌰",
+    "analogy": "🎭",
+    "counterexample": "⚠️",
+    "question": "🤔",
+    "rephrase": "🔁",
+    "none": "✅",
+}
+
+
+def _intervention_message(intervention: Any) -> str:
+    """Bubble text shown to the learner for a decided intervention."""
+    icon = _INTERVENTION_ICONS.get(intervention.get("action", ""), "💡")
+    return f"{icon} {intervention['content']}"
 
 
 def deprecated(message: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -153,6 +176,13 @@ class LearningSession:
 
         # V0.3.0 — 流程标记：''new''＝新流程（阅读→验证→深化），''legacy''＝旧四层追问
         self.flow: str = "legacy"
+
+        # V0.3.0 — Learning Loop v2：Learner State 驱动的动态循环
+        self.learner_state = LearnerState()
+        self.validation_kind: str | None = None
+        self.validation_difficulty: int | None = None
+        self._current_intervention: dict[str, Any] | None = None
+        self._offer: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ flow
 
@@ -344,94 +374,83 @@ class LearningSession:
     # ----------------------------------------------------- V0.3.0 validation
 
     def start_validation(self) -> str:
-        """Begin the validation stage: design one concrete validation task that
-        checks real understanding. Returns the task text.
+        """Design one concrete validation task that checks real understanding
+        (not rote recall). Enters the validation stage.
         """
         cid = self._require_started()
         logger.info(
-            "[DEBUG] start_validation 开始：concept=%s id=%s（拼接验证任务 prompt）",
+            "[DEBUG] start_validation 开始：concept=%s id=%s",
             self.title,
             cid,
         )
         prompt = validation_task_prompt(
-            title=self.title,
             source_text=self.source_text,
-            qa_history=self._format_history(),
+            concept=self.title,
+            text_type=self.text_type or "",
         )
         reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "设计验证任务")
         task = self._parse_or_raise(reply, ValidationTask, "验证任务")
         logger.info("[DEBUG] 验证任务设计完成：task=%r", task.task)
         self.validation_task = task.task
-        self.validation_target = task.target
+        self.validation_kind = task.type
+        self.validation_difficulty = task.difficulty
+        self.validation_target = None
         self.validation_attempts = 0
         self.validation_passed = False
         self.needs_relearning = False
+        self.learner_state = LearnerState()
+        self._current_intervention = None
+        self._offer = None
         self.stage = "validation"
         self._persist_new_flow()
         logger.info("Validation started for concept %s (id=%s)", self.title, cid)
         return self.validation_task
 
     def submit_validation(self, answer: str) -> dict[str, Any]:
-        """Judge the validation-task answer. After 3 consecutive failures the
-        concept is marked as「需要重新学习」.
+        """Analyse the learner's closed-book answer into a Learner State.
+
+        - No gap → validation passes, move to the deepen offer (stage "offer").
+        - Gap → decide the minimal intervention and move to stage
+          "intervention" (or finish if no valuable intervention remains).
         """
         cid = self._require_started()
-        if self.stage != "validation" or self.validation_task is None:
+        if self.stage != "validation":
             raise SessionError("submit_validation can only be called during validation")
-        if self.validation_target is None:
-            raise SessionError("validation target is missing; call start_validation() first")
 
-        attempts_left = VALIDATION_MAX_ATTEMPTS - self.validation_attempts
-        reply = self._chat_or_raise(
-            validate_answer_prompt(
-                title=self.title,
-                task=self.validation_task,
-                target=self.validation_target,
-                answer=answer,
-                attempts_left=attempts_left,
-            ),
-            JUDGE_TEMPERATURE,
-            "判断验证作答",
-        )
-        result = self._parse_or_raise(reply, ValidateAnswerResult, "验证判定")
-
-        if result.is_correct:
-            self.validation_passed = True
-            self.validation_attempts = 0
-            # 验证通过 → 进入深化追问阶段
-            self.stage = "deepening"
-        else:
-            self.validation_attempts += 1
-            if self.validation_attempts >= VALIDATION_MAX_ATTEMPTS:
-                self.needs_relearning = True
-                self.stage = "relearn"
-                logger.info(
-                    "Validation failed %d times for concept %s (id=%s) -> needs relearning",
-                    VALIDATION_MAX_ATTEMPTS,
-                    self.title,
-                    cid,
-                )
-
+        analysis = self._analyze_learner(answer)
         self.validation_history.append(
             {
                 "answer": answer,
-                "passed": bool(result.is_correct),
-                "feedback": result.feedback,
-                "missing": result.missing,
+                "understanding_level": analysis.understanding_level,
+                "last_response_quality": analysis.last_response_quality,
+                "understood": analysis.understood,
+                "uncertain": analysis.uncertain,
+                "misconceptions": analysis.misconceptions,
             }
         )
+        self.validation_attempts += 1
         self._persist_new_flow()
 
-        return {
-            "passed": self.validation_passed,
-            "feedback": result.feedback,
-            "missing": result.missing,
-            "attempts_left": max(
-                0, VALIDATION_MAX_ATTEMPTS - self.validation_attempts
-            ),
-            "needs_relearning": self.needs_relearning,
-            "stage": self.stage,
-        }
+        if not self.learner_state.has_gap():
+            self.validation_passed = True
+            self.validation_attempts = 0
+            self.stage = "offer"
+            self._persist_new_flow()
+            logger.info(
+                "Validation passed for concept %s (level=%s)",
+                self.title,
+                self.learner_state.understanding_level,
+            )
+            return {
+                "stage": "offer",
+                "understanding_level": self.learner_state.understanding_level,
+                "quality": self.learner_state.last_response_quality,
+            }
+
+        intervention = self._decide_intervention(mode="validation")
+        if intervention is None:
+            return self._finish_new_flow()
+        return self._apply_intervention(intervention)
 
     def ask_simplify(self) -> str:
         """Give a one-notch-simpler plain-language explanation of the concept.
@@ -469,7 +488,7 @@ class LearningSession:
 
         qtype = DEEPER_QUESTION_ORDER[self.current_deeper_index]
         reply = self._chat_or_raise(
-            deeper_question_prompt(
+            _legacy_deeper_question_prompt(
                 title=self.title,
                 source_text=self.source_text,
                 question_type=qtype,
@@ -518,9 +537,9 @@ class LearningSession:
         }
 
     def force_validation_pass(self) -> None:
-        """V0.3.0 — AI 判断不可用时，用户可手动「跳过」验证并进入深化阶段。
+        """V0.3.0 — AI 判断不可用时，用户可手动「跳过」验证。
 
-        仅用于临时放行：把本轮验证视为通过，进入 deepening，不等待 AI。
+        仅用于临时放行：把本轮验证视为通过，进入深入选择阶段，不等待 AI。
         """
         cid = self._require_started()
         if self.stage != "validation":
@@ -529,7 +548,7 @@ class LearningSession:
             )
         self.validation_passed = True
         self.validation_attempts = 0
-        self.stage = "deepening"
+        self.stage = "offer"
         self.validation_history.append(
             {
                 "answer": "(由用户选择跳过，未经过 AI 判断)",
@@ -556,6 +575,240 @@ class LearningSession:
         self._persist_new_flow()
         add_to_review_queue(cid)
         logger.info("Deepening manually finished early for concept %s (id=%s)", self.title, cid)
+
+    # ------------------------------------------- V0.3.0 Learning Loop v2
+    # Learner State 驱动的动态循环：验证 → （修复/深化）→ 深入选择 → 动态结束。
+
+    def offer_deepening(self) -> dict[str, Any]:
+        """Ask the learner (in their own voice) whether to keep going deeper
+        after validation passed. Returns {"offer": str, "options": [...]}."""
+        cid = self._require_started()
+        if self.stage != "offer":
+            raise SessionError("offer_deepening can only be called at offer stage")
+        reply = self._chat_or_raise(
+            deepening_offer_prompt(
+                concept=self.title,
+                understanding_level=self.learner_state.understanding_level,
+            ),
+            OTHER_TEMPERATURE,
+            "深化邀请",
+        )
+        offer = self._parse_or_raise(reply, DeepeningOffer, "深化邀请")
+        self._offer = {
+            "offer": offer.offer,
+            "options": [str(o) for o in offer.options],
+        }
+        logger.info("Deepen offer generated for concept %s (id=%s)", self.title, cid)
+        return dict(self._offer)
+
+    def choose_deepening(self, go: bool) -> dict[str, Any]:
+        """Apply the learner's decision after the deepen offer.
+
+        - ``go=False`` → finish the session now.
+        - ``go=True`` → target the next valuable gap with a minimal
+          intervention (stage "intervention").
+        """
+        cid = self._require_started()
+        if self.stage != "offer":
+            raise SessionError("choose_deepening can only be called at offer stage")
+        if not go:
+            logger.info("Learner chose to stop after validation (concept=%s)", self.title)
+            return self._finish_new_flow()
+        intervention = self._decide_intervention(mode="deepening")
+        if intervention is None:
+            return self._finish_new_flow()
+        return self._apply_intervention(intervention)
+
+    def submit_intervention_answer(self, answer: str) -> dict[str, Any]:
+        """Update the Learner State from the learner's answer to the current
+        minimal intervention, then decide what to do next.
+
+        - No valuable gap left → finish.
+        - Gap remains → the next minimal intervention (stage stays
+          "intervention").
+        """
+        cid = self._require_started()
+        if self.stage != "intervention" or self._current_intervention is None:
+            raise SessionError(
+                "no active intervention; call submit_validation/choose_deepening first"
+            )
+        current = self._current_intervention
+        update = self._update_learner(answer)
+        self.deeper_history.append(
+            {
+                "question": current["content"],
+                "answer": answer,
+                "action": current["action"],
+                "understanding_level": update.understanding_level,
+                "last_response_quality": update.last_response_quality,
+                "understood": update.understood,
+                "uncertain": update.uncertain,
+                "misconceptions": update.misconceptions,
+                "next_best_action": update.next_best_action,
+            }
+        )
+        self.current_deeper_index += 1
+        self._current_intervention = None
+        self._persist_new_flow()
+        logger.info(
+            "Intervention answered for concept %s (id=%s, level=%s)",
+            self.title,
+            cid,
+            self.learner_state.understanding_level,
+        )
+
+        if self.learner_state.should_stop():
+            return self._finish_new_flow()
+        next_intervention = self._decide_intervention(mode="deepening")
+        if next_intervention is None:
+            return self._finish_new_flow()
+        return self._apply_intervention(next_intervention)
+
+    def current_intervention(self) -> dict[str, Any] | None:
+        """The minimal intervention currently on screen, or None."""
+        return self._current_intervention
+
+    def next_intervention(self, *, mode: str = "deepening") -> dict[str, Any]:
+        """Decide and surface the next minimal intervention (used on resume /
+        auto-refresh when none is on screen)."""
+        cid = self._require_started()
+        if self._current_intervention is not None:
+            return {
+                "stage": "intervention",
+                "bubble": _intervention_message(self._current_intervention),
+            }
+        intervention = self._decide_intervention(mode=mode)
+        if intervention is None:
+            return self._finish_new_flow()
+        return self._apply_intervention(intervention)
+
+    def _apply_intervention(self, intervention: dict[str, Any]) -> dict[str, Any]:
+        """Surface a decided minimal intervention on screen.
+
+        If the intervention is a closing note that does not need a user
+        response (``requires_user_response`` false), finish the flow with it
+        instead of waiting for an answer.
+        """
+        if not intervention.get("requires_user_response", True):
+            return self._finish_new_flow(intervention)
+        self._current_intervention = intervention
+        self.stage = "intervention"
+        self._persist_new_flow()
+        return {
+            "stage": "intervention",
+            "bubble": _intervention_message(intervention),
+        }
+
+    # ------------------------------------------------------------- v2 internals
+
+    def _analyze_learner(self, answer: str) -> LearnerStateAnalysis:
+        reply = self._chat_or_raise(
+            learner_state_analyzer_prompt(
+                source_text=self.source_text,
+                concept=self.title,
+                task=self.validation_task or "用自己的话解释这个概念",
+                user_answer=answer,
+                context=self._format_learner_context(),
+            ),
+            JUDGE_TEMPERATURE,
+            "分析学习者状态",
+        )
+        analysis = self._parse_or_raise(reply, LearnerStateAnalysis, "学习者状态分析")
+        self.learner_state.update_from_analysis(analysis.model_dump())
+        return analysis
+
+    def _update_learner(self, answer: str) -> LearnerStateUpdate:
+        reply = self._chat_or_raise(
+            learner_state_updater_prompt(
+                source_text=self.source_text,
+                concept=self.title,
+                intervention=self._current_intervention["content"]
+                if self._current_intervention
+                else "",
+                user_answer=answer,
+                learner_state=json.dumps(
+                    self.learner_state.to_dict(), ensure_ascii=False
+                ),
+                context=self._format_learner_context(),
+            ),
+            JUDGE_TEMPERATURE,
+            "更新学习者状态",
+        )
+        update = self._parse_or_raise(reply, LearnerStateUpdate, "学习者状态更新")
+        self.learner_state.update_from_analysis(update.model_dump())
+        return update
+
+    def _decide_intervention(
+        self, *, mode: str
+    ) -> dict[str, Any] | None:
+        reply = self._chat_or_raise(
+            intervention_decider_prompt(
+                source_text=self.source_text,
+                concept=self.title,
+                learner_state=json.dumps(
+                    self.learner_state.to_dict(), ensure_ascii=False
+                ),
+                current_target=self.validation_task or "用自己的话解释这个概念",
+                mode=mode,
+                context=self._format_learner_context(),
+            ),
+            QUESTION_TEMPERATURE,
+            "决定最小干预",
+        )
+        inter = self._parse_or_raise(reply, Intervention, "干预决策")
+        if inter.action == "none":
+            # 没有值得继续的干预：若给了收尾内容，则作为最终提示后结束
+            if inter.content:
+                return {
+                    "action": "none",
+                    "reason": inter.reason or "",
+                    "content": inter.content,
+                    "requires_user_response": False,
+                }
+            return None
+        return {
+            "action": inter.action,
+            "reason": inter.reason or "",
+            "content": inter.content,
+            "requires_user_response": inter.requires_user_response,
+        }
+
+    def _finish_new_flow(
+        self, final_intervention: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Finish the new flow: complete/connections + add to review queue."""
+        cid = self._require_started()
+        self._current_intervention = None
+        self.stage = "complete"
+        self.phase = "connections"
+        self._persist_new_flow()
+        add_to_review_queue(cid)
+        logger.info(
+            "New flow finished for concept %s (id=%s, level=%s)",
+            self.title,
+            cid,
+            self.learner_state.understanding_level,
+        )
+        result: dict[str, Any] = {"stage": "complete"}
+        if final_intervention and final_intervention.get("content"):
+            result["final_note"] = _intervention_message(final_intervention)
+        return result
+
+    def _format_learner_context(self) -> str:
+        """Compact context for the analyzer/decider/updater prompts."""
+        lines: list[str] = []
+        for i, qa in enumerate(self.qa_history[-6:], 1):
+            lines.append(f"{i}. Q: {qa['question']}")
+            lines.append(f"   A: {qa['answer']}")
+        for i, v in enumerate(self.validation_history, 1):
+            lines.append(
+                f"验证{i}: {v['answer']}（层级 {v.get('understanding_level')}）"
+            )
+        for i, d in enumerate(self.deeper_history, 1):
+            lines.append(
+                f"干预{i}: {d['question']} → {d['answer']}（层级 {d.get('understanding_level')}）"
+            )
+        return "\n".join(lines)
 
     def _chat_or_raise(self, prompt: str, temperature: float, what: str) -> str:
         """Send one AI request with explicit logging around the call.
@@ -614,6 +867,8 @@ class LearningSession:
             validation_type=self.text_type,
             validation_task=self.validation_task,
             validation_target=self.validation_target,
+            validation_kind=self.validation_kind,
+            validation_difficulty=self.validation_difficulty,
             validation_passed=self.validation_passed,
             validation_attempts=self.validation_attempts,
             needs_relearning=self.needs_relearning,
@@ -824,6 +1079,8 @@ def restore_session(
         session.text_type = concept.get("validation_type")
         session.validation_task = concept.get("validation_task")
         session.validation_target = concept.get("validation_target")
+        session.validation_kind = concept.get("validation_kind")
+        session.validation_difficulty = int(concept.get("validation_difficulty") or 2)
         session.validation_passed = bool(concept.get("validation_passed"))
         session.validation_attempts = int(concept.get("validation_attempts") or 0)
         session.needs_relearning = bool(concept.get("needs_relearning"))
@@ -831,11 +1088,25 @@ def restore_session(
         session.deeper_questions = _load_json_list(concept.get("deeper_questions"))
         session.deeper_history = _load_json_list(concept.get("deeper_answers"))
         session.current_deeper_index = int(concept.get("deeper_index") or 0)
+        # Learning Loop v2：从最近的回答快照重建 Learner State
+        snapshot: dict[str, Any] | None = None
+        for entry in reversed(session.deeper_history):
+            if "understanding_level" in entry:
+                snapshot = entry
+                break
+        if snapshot is None:
+            for entry in reversed(session.validation_history):
+                if "understanding_level" in entry:
+                    snapshot = entry
+                    break
+        session.learner_state = LearnerState.from_dict(snapshot)
         if session.stage == "complete":
             session.phase = "connections"
+        elif session.stage == "intervention":
+            # 屏幕上那道最小干预在回答前不会落库；恢复后由 UI 自动决策下一条。
+            session._current_intervention = None
         elif session.stage == "deepening":
-            # 恢复「屏幕上那道深化问题」：若最后一道已被回答过，则留空让 UI
-            # 生成下一道；否则把它还原到屏幕上让用户继续作答。
+            # 兼容旧数据（重构前的固定深化阶段）：恢复屏幕上的深化问题
             last_generated = (
                 session.deeper_questions[-1] if session.deeper_questions else None
             )

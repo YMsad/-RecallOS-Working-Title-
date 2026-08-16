@@ -165,6 +165,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("validation_type", "validation_type TEXT"),
         ("validation_task", "validation_task TEXT"),
         ("validation_target", "validation_target TEXT"),
+        ("validation_kind", "validation_kind TEXT"),
+        ("validation_difficulty", "validation_difficulty INTEGER NOT NULL DEFAULT 2"),
         ("validation_passed", "validation_passed INTEGER NOT NULL DEFAULT 0"),
         ("validation_attempts", "validation_attempts INTEGER NOT NULL DEFAULT 0"),
         ("validation_history", "validation_history TEXT"),
@@ -233,6 +235,8 @@ def update_concept(
     validation_type: str | None = None,
     validation_task: str | None = None,
     validation_target: str | None = None,
+    validation_kind: str | None = None,
+    validation_difficulty: int | None = None,
     validation_passed: bool | None = None,
     validation_attempts: int | None = None,
     validation_history: str | None = None,
@@ -268,6 +272,10 @@ def update_concept(
         fields["validation_task"] = validation_task
     if validation_target is not None:
         fields["validation_target"] = validation_target
+    if validation_kind is not None:
+        fields["validation_kind"] = validation_kind
+    if validation_difficulty is not None:
+        fields["validation_difficulty"] = int(validation_difficulty)
     if validation_passed is not None:
         fields["validation_passed"] = int(validation_passed)
     if validation_attempts is not None:

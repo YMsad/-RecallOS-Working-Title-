@@ -63,15 +63,64 @@ def summary_reply(breakthrough: str, hook: str) -> httpx.Response:
     )
 
 
-def validation_task_reply(task: str, target: str) -> httpx.Response:
+def validation_task_reply(task: str, kind: str = "summary", difficulty: int = 2) -> httpx.Response:
     return text_reply(
-        json.dumps({"task": task, "target": target}, ensure_ascii=False)
+        json.dumps({"task": task, "type": kind, "difficulty": difficulty}, ensure_ascii=False)
     )
 
 
-def validate_reply(is_correct: bool, feedback: str, missing=None) -> httpx.Response:
-    body = {"is_correct": is_correct, "feedback": feedback, "missing": missing}
+def analysis_reply(
+    level="relationship",
+    understood=(),
+    uncertain=(),
+    misconceptions=(),
+    quality="partial",
+) -> httpx.Response:
+    body = {
+        "understanding_level": level,
+        "understood": list(understood),
+        "uncertain": list(uncertain),
+        "misconceptions": list(misconceptions),
+        "last_response_quality": quality,
+    }
     return text_reply(json.dumps(body, ensure_ascii=False))
+
+
+def update_reply(
+    level="relationship",
+    understood=(),
+    uncertain=(),
+    misconceptions=(),
+    quality="partial",
+    next_best_action="none",
+) -> httpx.Response:
+    body = {
+        "understanding_level": level,
+        "understood": list(understood),
+        "uncertain": list(uncertain),
+        "misconceptions": list(misconceptions),
+        "last_response_quality": quality,
+        "next_best_action": next_best_action,
+    }
+    return text_reply(json.dumps(body, ensure_ascii=False))
+
+
+def intervention_reply(
+    action="hint", content="想一想成本指的是什么", requires_user_response=True, reason=None
+) -> httpx.Response:
+    body = {
+        "action": action,
+        "content": content,
+        "requires_user_response": requires_user_response,
+        "reason": reason,
+    }
+    return text_reply(json.dumps(body, ensure_ascii=False))
+
+
+def offer_reply(offer: str = "要不要再挖一层？") -> httpx.Response:
+    return text_reply(
+        json.dumps({"offer": offer, "options": ["深入", "先到这里"]}, ensure_ascii=False)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -475,81 +524,99 @@ def test_learning_complete_queues_review_without_finish() -> None:
 
 
 # ------------------------------------------------------- V0.3.0 validation stage
+# Learning Loop v2：验证任务 → 学习者状态分析 → 最小干预 → 动态结束
 
 
 def test_start_validation_designs_task_and_sets_stage() -> None:
     session, transport = make_session(
-        text_reply("Q1"),
-        validation_task_reply("用一句话向朋友解释机会成本", "关键点：放弃的次优价值"),
+        validation_task_reply("用一句话向朋友解释机会成本", "summary", 2),
     )
-    session.start()
+    cid = session.begin()
     task_text = session.start_validation()
     assert task_text == "用一句话向朋友解释机会成本"
-    assert session.validation_target == "关键点：放弃的次优价值"
+    assert session.validation_kind == "summary"
+    assert session.validation_difficulty == 2
     assert session.stage == "validation"
     assert session.validation_passed is False
     assert session.needs_relearning is False
-    payload = transport.requests[1]["messages"][1]["content"]
-    assert "验证任务" in payload
+    payload = transport.requests[0]["messages"][1]["content"]
+    assert "验证" in payload
+    assert '"task"' in payload
+    # learner state 被重置
+    assert session.learner_state.understanding_level == "surface"
+    assert session.current_intervention() is None
+    assert session._offer is None
 
 
 def test_start_validation_malformed_reply_raises_friendly_session_error() -> None:
     """AI 返回非 JSON：转成可重试的 SessionError，而不是未捕获的校验异常。"""
-    session, _ = make_session(text_reply("Q1"), text_reply("抱歉，我这次没按格式输出"))
-    session.start()
+    session, _ = make_session(text_reply("抱歉，我这次没按格式输出"))
+    session.begin()
     with pytest.raises(SessionError, match="格式不正确"):
         session.start_validation()
-    assert session.stage == "learning"  # 失败不前进
+    assert session.stage == "reading"  # 失败不前进
 
 
-def test_validation_success_sets_passed() -> None:
+def test_submit_validation_no_gap_moves_to_offer() -> None:
     session, _ = make_session(
-        text_reply("Q1"),
-        validation_task_reply("任务", "目标"),
-        validate_reply(True, "很好，你已经抓住了核心"),
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["理解了核心含义"], quality="deep"),
     )
-    session.start()
+    cid = session.begin()
     session.start_validation()
     result = session.submit_validation("机会成本就是我必须放弃的那个次优选择")
-    assert result["passed"] is True
-    assert result["feedback"] == "很好，你已经抓住了核心"
-    assert result["missing"] is None
-    assert result["needs_relearning"] is False
+    assert result["stage"] == "offer"
+    assert result["understanding_level"] == "relationship"
     assert session.validation_passed is True
     assert session.validation_attempts == 0
-    # 验证通过后进入深化追问阶段
-    assert session.stage == "deepening"
+    assert session.stage == "offer"
+    assert len(session.validation_history) == 1
+    assert session.learner_state.has_gap() is False
 
 
-def test_validation_three_failures_marks_needs_relearning() -> None:
-    session, _ = make_session(
-        text_reply("Q1"),
-        validation_task_reply("任务", "目标"),
-        validate_reply(False, "再想想", "缺关键点1"),
-        validate_reply(False, "再想想", "缺关键点2"),
-        validate_reply(False, "最后提示", "还是缺关键点3"),
+def test_submit_validation_gap_moves_to_intervention() -> None:
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"], misconceptions=["混淆了机会成本与沉没成本"]),
+        intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
     )
-    session.start()
+    cid = session.begin()
     session.start_validation()
-    r1 = session.submit_validation("回答1")
-    assert r1["passed"] is False
-    assert r1["attempts_left"] == 2
-    assert r1["needs_relearning"] is False
+    result = session.submit_validation("回答")
+    assert result["stage"] == "intervention"
+    assert "如果放弃三个选择" in result["bubble"]
+    assert session.stage == "intervention"
+    assert session.validation_passed is False
+    assert session.current_intervention()["action"] == "counterexample"
+    assert len(session.validation_history) == 1
+    # 决策器/分析器 prompt 都体现了学习者状态
+    payloads = [p["messages"][1]["content"] for p in transport.requests]
+    assert any("学习者状态分析器" in p for p in payloads)
+    assert any("最小干预决策器" in p for p in payloads)
 
-    r2 = session.submit_validation("回答2")
-    assert r2["attempts_left"] == 1
-    assert r2["needs_relearning"] is False
 
-    r3 = session.submit_validation("回答3")
-    assert r3["needs_relearning"] is True
-    assert r3["stage"] == "relearn"
-    assert session.stage == "relearn"
-    assert session.needs_relearning is True
+def test_submit_validation_closing_note_finishes() -> None:
+    """决策器返回 action=none（收尾内容、无需用户作答）→ 直接完成整个流程。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("none", "你已经理解核心，边界问题已不值得继续追问。", requires_user_response=False),
+    )
+    cid = session.begin()
+    session.start_validation()
+    result = session.submit_validation("回答")
+    assert result["stage"] == "complete"
+    assert "你已经理解核心" in result["final_note"]
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert session.current_intervention() is None
+    row = database.get_concept(cid)
+    assert row["next_review_date"] == (date.today() + timedelta(days=1)).isoformat()
 
 
 def test_submit_validation_requires_validation_stage() -> None:
-    session, _ = make_session(text_reply("Q1"))
-    session.start()
+    session, _ = make_session()
+    session.begin()
     with pytest.raises(SessionError):
         session.submit_validation("x")
 
@@ -566,6 +633,161 @@ def test_ask_simplify_returns_plain_text_and_keeps_stage() -> None:
     assert session.stage == "validation"
     payload = transport.requests[1]["messages"][1]["content"]
     assert "讲得不够简单" in payload
+
+
+# ------------------------------------------------------ V0.3.0 deepen offer loop
+
+
+def test_offer_deepening_generates_offer() -> None:
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
+        offer_reply("你已经抓住核心，要不要再挖一层？"),
+    )
+    session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    result = session.offer_deepening()
+    assert result["offer"] == "你已经抓住核心，要不要再挖一层？"
+    assert result["options"] == ["深入", "先到这里"]
+    assert session.stage == "offer"
+    payload = transport.requests[2]["messages"][1]["content"]
+    assert "继续深入" in payload
+
+
+def test_offer_deepening_requires_offer_stage() -> None:
+    session, _ = make_session()
+    session.begin()
+    with pytest.raises(SessionError):
+        session.offer_deepening()
+
+
+def test_choose_deepening_stop_finishes() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    result = session.choose_deepening(False)
+    assert result["stage"] == "complete"
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    row = database.get_concept(cid)
+    assert row["next_review_date"] == (date.today() + timedelta(days=1)).isoformat()
+
+
+def test_choose_deepening_requires_offer_stage() -> None:
+    session, _ = make_session()
+    session.begin()
+    with pytest.raises(SessionError):
+        session.choose_deepening(True)
+
+
+def test_choose_deepening_go_starts_intervention_loop() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
+        offer_reply("要不要再挖一层？"),
+        intervention_reply("example", "想想你周末放弃游戏时间的选择"),
+        update_reply("application", understood=["核心", "会应用"], next_best_action="none"),
+        intervention_reply("none", "", requires_user_response=False),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    session.offer_deepening()
+    result = session.choose_deepening(True)
+    assert result["stage"] == "intervention"
+    assert "想想你周末" in result["bubble"]
+    assert session.stage == "intervention"
+    assert session.current_intervention()["action"] == "example"
+
+    # 用户回答 → updater 判断巨大进步（无缺口 + next_best_action=none）→ 再决策 → 无剩余干预 → 完成
+    result = session.submit_intervention_answer("周末我会权衡取舍")
+    assert result["stage"] == "complete"
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert len(session.deeper_history) == 1
+    assert session.deeper_history[0]["question"].startswith("想想你周末")
+    assert session.deeper_history[0]["answer"] == "周末我会权衡取舍"
+    assert session.deeper_history[0]["understanding_level"] == "application"
+    assert database.get_concept(cid)["mastery"] is not None
+
+
+def test_submit_intervention_answer_requires_active_intervention() -> None:
+    session, _ = make_session()
+    session.begin()
+    with pytest.raises(SessionError):
+        session.submit_intervention_answer("x")
+
+
+def test_next_intervention_continues_after_restore() -> None:
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界"], misconceptions=["混淆"]),
+        intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        intervention_reply("question", "机会成本里的“成本”指的是什么？"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    assert session.stage == "intervention"
+
+    restored = restore_session(cid, client=session.client)
+    assert restored.flow == "new"
+    assert restored.stage == "intervention"
+    assert restored.current_intervention() is None  # 未回答的干预不落库
+
+    result = restored.next_intervention()
+    assert result["stage"] == "intervention"
+    assert "机会成本里" in result["bubble"]
+    assert restored.stage == "intervention"
+
+
+# ---------------------------------------------------- V0.3.0 learner state unit
+
+
+def test_learner_state_level_never_regresses() -> None:
+    from core.learner_state import LearnerState
+
+    state = LearnerState()
+    state.update_from_analysis(
+        {
+            "understanding_level": "relationship",
+            "understood": ["x"],
+            "uncertain": [],
+            "misconceptions": [],
+            "last_response_quality": "deep",
+        }
+    )
+    assert state.understanding_level == "relationship"
+    # AI 判断回退到低层级时，保留历史最高层级
+    state.update_from_analysis(
+        {
+            "understanding_level": "surface",
+            "understood": ["x"],
+            "uncertain": ["y"],
+            "misconceptions": [],
+            "last_response_quality": "shallow",
+        }
+    )
+    assert state.understanding_level == "relationship"
+    assert state.has_gap() is True
+
+
+def test_learner_state_should_stop_logic() -> None:
+    from core.learner_state import LearnerState
+
+    assert LearnerState(understanding_level="relationship", next_best_action="none").should_stop() is True
+    assert LearnerState(
+        understanding_level="relationship", uncertain=["边界"], next_best_action="none"
+    ).should_stop() is False
+    # 无缺口但 AI 仍认为值得行动 → 不停
+    assert LearnerState(
+        understanding_level="relationship", next_best_action="hint"
+    ).should_stop() is False
 
 
 # -------------------------------------------------------- V0.3.0 deeper questions
@@ -668,92 +890,57 @@ def test_restore_new_flow_reading_stage() -> None:
     assert restored.title == "机会成本"
 
 
-def test_restore_new_flow_validation_preserves_attempts_and_task() -> None:
+def test_restore_new_flow_validation_preserves_state() -> None:
     session, _ = make_session(
-        validation_task_reply("用一句话向朋友解释机会成本", "关键点：放弃的次优价值"),
-        validate_reply(False, "再想想", "缺关键点1"),
-        validate_reply(False, "再想想", "缺关键点2"),
+        validation_task_reply("任务", "summary", 2),
+        analysis_reply("relationship", uncertain=["边界"]),
+        intervention_reply("hint", "想一想成本指的是什么"),
     )
     cid = session.begin()
     session.start_validation()
     session.submit_validation("回答1")
-    session.submit_validation("回答2")
-    assert session.stage == "validation"
-    assert session.validation_attempts == 2
+    assert session.stage == "intervention"
 
     restored = restore_session(cid)
     assert restored.flow == "new"
-    assert restored.stage == "validation"
-    assert restored.validation_task == "用一句话向朋友解释机会成本"
-    assert restored.validation_target == "关键点：放弃的次优价值"
-    assert restored.validation_attempts == 2
-    assert restored.needs_relearning is False
-    assert len(restored.validation_history) == 2
-    assert restored.validation_history[0]["answer"] == "回答1"
-    assert restored.validation_history[1]["passed"] is False
+    assert restored.stage == "intervention"
+    assert restored.validation_task == "任务"
+    assert restored.validation_kind == "summary"
+    assert restored.validation_difficulty == 2
+    assert restored.validation_attempts == 1
+    assert restored.current_intervention() is None  # 未回答的干预不落库
+    assert len(restored.validation_history) == 1
+    assert restored.validation_history[0]["understanding_level"] == "relationship"
+    assert restored.learner_state.understanding_level == "relationship"
 
 
-def test_restore_new_flow_deepening_restores_unanswered_question() -> None:
+def test_restore_new_flow_offer_stage() -> None:
     session, _ = make_session(
-        validation_task_reply("任务", "目标"),
-        validate_reply(True, "通过"),
-        text_reply("深化问题一"),
-        text_reply("深化问题二"),
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
     )
     cid = session.begin()
     session.start_validation()
-    session.submit_validation("机会成本是我放弃的次优选择")
-    session.next_deeper_question()  # 深化问题一
-    session.submit_deeper_answer("我的思考一")
-    session.next_deeper_question()  # 深化问题二（尚未回答）
-    assert session.stage == "deepening"
-    assert session.current_deeper_index == 2
+    session.submit_validation("回答")
+    assert session.stage == "offer"
 
     restored = restore_session(cid)
     assert restored.flow == "new"
-    assert restored.stage == "deepening"
-    assert restored.current_deeper_index == 2
-    assert restored._current_deeper_question == "深化问题二"
-    assert len(restored.deeper_history) == 1
-
-
-def test_restore_new_flow_deepening_last_answered_has_no_open_question() -> None:
-    session, _ = make_session(
-        validation_task_reply("任务", "目标"),
-        validate_reply(True, "通过"),
-        text_reply("深化问题一"),
-        text_reply("深化问题二"),
-    )
-    cid = session.begin()
-    session.start_validation()
-    session.submit_validation("答案")
-    session.next_deeper_question()
-    session.submit_deeper_answer("思考一")
-    session.next_deeper_question()
-    session.submit_deeper_answer("思考二")
-
-    restored = restore_session(cid)
-    assert restored.stage == "deepening"
-    assert restored._current_deeper_question is None
-    assert len(restored.deeper_questions) == 2
+    assert restored.stage == "offer"
+    assert restored.validation_passed is True
+    assert restored.validation_kind == "summary"
+    assert restored.learner_state.understanding_level == "relationship"
 
 
 def test_restore_new_flow_complete_sets_connections_phase() -> None:
     session, _ = make_session(
-        validation_task_reply("任务", "目标"),
-        validate_reply(True, "通过"),
-        text_reply("再验证问题"),
-        text_reply("联系问题"),
-        text_reply("反事实问题"),
-        text_reply("行动问题"),
-        text_reply("第一性原理问题"),
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
     )
     cid = session.begin()
     session.start_validation()
-    session.submit_validation("答案")
-    for _ in range(5):
-        assert session.next_deeper_question() is not None
-    assert session.next_deeper_question() is None  # 深化全部完成
+    session.submit_validation("回答")
+    session.choose_deepening(False)
     assert session.stage == "complete"
     assert session.phase == "connections"
 
@@ -761,6 +948,5 @@ def test_restore_new_flow_complete_sets_connections_phase() -> None:
     assert restored.flow == "new"
     assert restored.stage == "complete"
     assert restored.phase == "connections"
-    assert restored.current_deeper_index == 5
-    assert len(restored.deeper_questions) == 5
-    assert restored.next_deeper_question() is None
+    assert restored.learner_state.understanding_level == "relationship"
+    assert restored.current_intervention() is None

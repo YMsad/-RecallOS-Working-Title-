@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any, Literal, TypeVar
 
+from pydantic import Field
+
 from core.models import NonEmptyStr, OptionalStr, RecallBaseModel
 
 T = TypeVar("T", bound=RecallBaseModel)
@@ -453,7 +455,7 @@ def detect_text_type_prompt(*, raw_text: str) -> str:
 {{"text_type": "concept", "title_hint": "标题提示或空字符串", "reason": "一句话理由或null"}}"""
 
 
-def validation_task_prompt(
+def _legacy_validation_task_prompt(
     *,
     title: str,
     source_text: str,
@@ -482,7 +484,7 @@ def validation_task_prompt(
 {{"task": "验证任务（具体、可执行）", "target": "正确理解应包含的关键点，1-2句"}}"""
 
 
-def validate_answer_prompt(
+def _legacy_validate_answer_prompt(
     *,
     title: str,
     task: str,
@@ -491,7 +493,7 @@ def validate_answer_prompt(
     attempts_left: int | None = None,
 ) -> str:
     """Judge the learner's validation-task answer. Returns JSON validated by
-    :class:`ValidateAnswerResult`.
+    :class:`LegacyValidateAnswerResult`.
     """
     attempt_note = (
         f"\n- 这是最后一次机会（还可重试 {attempts_left} 次），feedback 要更暖、更鼓励"
@@ -581,7 +583,7 @@ DEEPER_QUESTION_ORDER: tuple[str, ...] = (
 )
 
 
-def deeper_question_prompt(
+def _legacy_deeper_question_prompt(
     *,
     title: str,
     source_text: str,
@@ -605,6 +607,240 @@ def deeper_question_prompt(
         "要求：只输出这一个深化问题，具体、有画面感、略有挑战但不刁难，不要任何解释。"
     )
     return "\n\n".join(parts)
+
+
+# ----------------------------------------------------- V0.3.0 Learning Loop v2
+# 核心：持续观察 Learner State，用最小干预推动理解跃迁，不再靠固定轮次提问。
+# 新 prompt 用 {name} 占位符（见 _fill）；JSON 示例中的花括号无需转义。
+
+def _fill(template: str, **kwargs: str) -> str:
+    """Replace ``{name}`` placeholders. JSON braces in the template are safe."""
+    for key, value in kwargs.items():
+        template = template.replace("{" + key + "}", value)
+    return template
+
+
+def validation_task_prompt(
+    *,
+    source_text: str,
+    concept: str,
+    text_type: str = "",
+) -> str:
+    """Generate one low-cost task that verifies real understanding (not rote
+    recall). Returns JSON validated by :class:`ValidationTask`."""
+    return _fill(
+        """你是 RecallOS 的学习任务设计器。
+
+根据 source_text 生成一个验证任务，用来判断用户是否真正理解内容，而不是单纯记忆原文。
+
+优先选择最适合当前内容的任务类型，例如：
+- summary：用自己的话概括
+- translation：解释专业表达
+- analogy：用生活例子解释
+- application：说明如何应用
+- comparison：比较两个概念
+- prediction：预测某种情况下会发生什么
+
+规则：
+1. 任务必须能独立回答。
+2. 优先要求用户使用自己的话。
+3. 避免直接要求复述原文。
+4. 难度：1=基础理解，2=关系理解，3=较高阶理解。
+5. 只生成一个任务。
+6. 只输出合法 JSON。
+
+输入：
+concept: {concept}
+source_text: {source_text}
+text_type: {text_type}
+
+输出 JSON 格式：
+{"task": "不用原文中的句子，用自己的话解释这个概念为什么重要。", "type": "summary", "difficulty": 2}""",
+        source_text=source_text,
+        concept=concept,
+        text_type=text_type or "concept",
+    )
+
+
+def learner_state_analyzer_prompt(
+    *,
+    source_text: str,
+    concept: str,
+    task: str,
+    user_answer: str,
+    context: str = "",
+) -> str:
+    """Analyse the learner's closed-book explanation into a Learner State
+    snapshot. Returns JSON validated by :class:`LearnerStateAnalysis`."""
+    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    return _fill(
+        """你是 RecallOS 的学习者状态分析器。
+
+任务：根据原文和用户刚给出的闭卷解释，判断用户真正理解了什么、哪里不确定、哪里存在误解。
+不要只检查关键词；要判断用户是否真正表达了概念含义。
+
+理解层级：
+- surface：主要复述原文/关键词，没有明显自己的理解
+- relationship：能解释概念与其他概念、条件或结果之间的关系
+- application：能说明这个概念如何用于实际情况
+- essence：能解释概念为什么成立、解决什么问题或底层逻辑
+
+规则：
+1. 以 source_text 为主要依据，不凭常识替换原文含义。
+2. 表达方式不同但含义正确，应判为理解。
+3. 有核心误解时写入 misconceptions。
+4. 不因回答简短而降低层级判断。
+5. understood / uncertain / misconceptions 各自只列最重要的 1-3 条，用短句。
+6. 只输出合法 JSON，不要 Markdown 或解释。
+
+输入：
+concept: {concept}
+source_text: {source_text}
+task: {task}
+user_answer: {user_answer}{context_block}
+
+输出 JSON 格式：
+{"understanding_level": "relationship", "understood": ["理解了选择与放弃之间的关系"], "uncertain": ["没有明确理解机会成本只关注最佳替代方案"], "misconceptions": [], "last_response_quality": "partial"}""",
+        concept=concept,
+        source_text=source_text,
+        task=task,
+        user_answer=user_answer,
+        context_block=context_block,
+    )
+
+
+def intervention_decider_prompt(
+    *,
+    source_text: str,
+    concept: str,
+    learner_state: str,
+    current_target: str = "",
+    mode: str = "validation",
+    context: str = "",
+) -> str:
+    """Decide whether / how to intervene next (minimal intervention). Returns
+    JSON validated by :class:`Intervention`."""
+    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    mode_hint = (
+        "当前处于验证阶段：目标是确认/修复对核心含义的理解。"
+        if mode == "validation"
+        else "当前处于深入阶段：目标是找到当前理解层级之上、最值得推进的那一个缺口。"
+    )
+    return _fill(
+        """你是 RecallOS 的最小干预决策器。
+
+先回答：「这个用户现在最需要什么？」再决定是否值得干预、用什么最小干预。
+
+不要机械地"答对→下一题，答错→再问"。只有在存在真实且有价值的理解缺口时才干预。
+
+最小干预优先级（越靠前越好）：
+none → hint → example / analogy → counterexample → question → 解释
+
+规则：
+1. 能用一句提示解决，就不要给例子；能用一个例子解决，就不要解释完整答案。
+2. content 只给"刚好让用户能继续思考"的内容，绝不直接给出完整答案。
+3. 用户仍有缺口但干预已没有价值时，action=none 并结束。
+4. requires_user_response：需要用户重新回答时为 true；直接给出收尾解释时为 false。
+5. 只输出合法 JSON。
+
+{mode_hint}
+
+输入：
+concept: {concept}
+source_text: {source_text}
+当前目标：{current_target}
+learner_state: {learner_state}{context_block}
+
+输出 JSON 格式：
+{"action": "counterexample", "reason": "用户理解了基本关系，但无法识别概念边界", "content": "如果你放弃了三个选择，机会成本是不是三个选择加起来？为什么？", "requires_user_response": true}""",
+        concept=concept,
+        source_text=source_text,
+        learner_state=learner_state,
+        current_target=current_target or "验证任务",
+        mode_hint=mode_hint,
+        context_block=context_block,
+    )
+
+
+def learner_state_updater_prompt(
+    *,
+    source_text: str,
+    concept: str,
+    intervention: str,
+    user_answer: str,
+    learner_state: str,
+    context: str = "",
+) -> str:
+    """Update the Learner State from the learner's newest answer. Returns JSON
+    validated by :class:`LearnerStateUpdate`."""
+    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    return _fill(
+        """你是 RecallOS 的学习状态更新器。
+
+根据用户对上次干预的最新回答，更新学习者状态。只给出基于这次最新回答的新快照，
+不要机械地把历史条目复制进来。理解层级可以在原有基础上提升，也可以保持不变或更低。
+
+理解层级：
+- surface：复述定义或关键词
+- relationship：解释概念之间的关系
+- application：能够将概念用于具体情境
+- essence：理解底层逻辑、因果机制或存在原因
+
+next_best_action 是 AI 下一步最值得做的动作：none / hint / analogy / example / counterexample / question。
+
+规则：
+1. 不以回答长短判断质量。
+2. 正确但机械复述，只能算 surface。
+3. 只输出合法 JSON。
+
+输入：
+concept: {concept}
+source_text: {source_text}
+上次干预：{intervention}
+user_answer: {user_answer}
+learner_state: {learner_state}{context_block}
+
+输出 JSON 格式：
+{"understanding_level": "application", "understood": ["理解机会成本与选择有关", "能够识别具体情境中的机会成本"], "uncertain": [], "misconceptions": [], "last_response_quality": "deep", "next_best_action": "none"}""",
+        concept=concept,
+        source_text=source_text,
+        intervention=intervention,
+        user_answer=user_answer,
+        learner_state=learner_state,
+        context_block=context_block,
+    )
+
+
+def deepening_offer_prompt(
+    *,
+    concept: str,
+    understanding_level: str,
+) -> str:
+    """Ask the learner whether to keep going deeper after validation passes.
+    Returns JSON validated by :class:`DeepeningOffer`."""
+    return _fill(
+        """你是 RecallOS 的学习教练。
+
+用户已经基本理解「{concept}」。请生成一句自然、有吸引力的继续深入邀请，让用户自己选择是否继续。
+
+要求：
+1. 必须体现"你已经理解核心"。
+2. 暗示继续深入能获得什么价值。
+3. 不使用"你想不想"。
+4. 不制造压力。
+5. 最多 25 个中文字符。
+6. 根据 understanding_level 调整表达。
+7. 只输出合法 JSON。
+
+输入：
+concept: {concept}
+understanding_level: {understanding_level}
+
+输出 JSON 格式：
+{"offer": "你已经抓住核心，要不要再挖一层，看看它为什么成立？", "options": ["深入", "先到这里"]}""",
+        concept=concept,
+        understanding_level=understanding_level,
+    )
 
 
 # ------------------------------------------------------------------- messages
@@ -684,19 +920,66 @@ class TextTypeResult(RecallBaseModel):
     reason: OptionalStr = None
 
 
-class ValidationTask(RecallBaseModel):
-    """Validated output of :func:`validation_task_prompt`."""
+class LegacyValidationTask(RecallBaseModel):
+    """Validated output of the legacy (V0.3.0 pre-refactor) validation prompt."""
 
     task: NonEmptyStr
     target: NonEmptyStr
 
 
-class ValidateAnswerResult(RecallBaseModel):
-    """Validated output of :func:`validate_answer_prompt`."""
+class LegacyValidateAnswerResult(RecallBaseModel):
+    """Validated output of the legacy validate-answer prompt."""
 
     is_correct: bool
     feedback: NonEmptyStr
     missing: OptionalStr = None
+
+
+class ValidationTask(RecallBaseModel):
+    """Validated output of the V0.3.0 Learning Loop v2 validation prompt."""
+
+    task: NonEmptyStr
+    type: NonEmptyStr
+    difficulty: int = Field(default=2, ge=1, le=3)
+
+
+UnderstandingLevel = Literal["surface", "relationship", "application", "essence"]
+ResponseQuality = Literal["deep", "partial", "shallow"]
+InterventionAction = Literal[
+    "none", "hint", "analogy", "example", "counterexample", "question", "rephrase"
+]
+
+
+class LearnerStateAnalysis(RecallBaseModel):
+    """Validated output of :func:`learner_state_analyzer_prompt`."""
+
+    understanding_level: UnderstandingLevel
+    understood: list[str] = Field(default_factory=list)
+    uncertain: list[str] = Field(default_factory=list)
+    misconceptions: list[str] = Field(default_factory=list)
+    last_response_quality: ResponseQuality
+
+
+class Intervention(RecallBaseModel):
+    """Validated output of :func:`intervention_decider_prompt`."""
+
+    action: InterventionAction
+    reason: OptionalStr = None
+    content: NonEmptyStr
+    requires_user_response: bool = True
+
+
+class LearnerStateUpdate(LearnerStateAnalysis):
+    """Validated output of :func:`learner_state_updater_prompt`."""
+
+    next_best_action: InterventionAction
+
+
+class DeepeningOffer(RecallBaseModel):
+    """Validated output of :func:`deepening_offer_prompt`."""
+
+    offer: NonEmptyStr
+    options: list[NonEmptyStr] = Field(default_factory=lambda: ["深入", "先到这里"])
 
 
 __all__ = [
@@ -720,11 +1003,24 @@ __all__ = [
     "ConnectionSuggestion",
     "TextTypeResult",
     "ValidationTask",
-    "ValidateAnswerResult",
+    "LearnerStateAnalysis",
+    "Intervention",
+    "LearnerStateUpdate",
+    "DeepeningOffer",
     "detect_text_type_prompt",
     "validation_task_prompt",
-    "validate_answer_prompt",
+    "learner_state_analyzer_prompt",
+    "intervention_decider_prompt",
+    "learner_state_updater_prompt",
+    "deepening_offer_prompt",
     "simplify_explanation_prompt",
-    "deeper_question_prompt",
     "DEEPER_QUESTION_ORDER",
+    "LegacyValidationTask",
+    "LegacyValidateAnswerResult",
+    "_legacy_validation_task_prompt",
+    "_legacy_validate_answer_prompt",
+    "_legacy_deeper_question_prompt",
+    "UnderstandingLevel",
+    "ResponseQuality",
+    "InterventionAction",
 ]
