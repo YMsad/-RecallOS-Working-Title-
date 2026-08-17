@@ -1373,7 +1373,9 @@ def render_history() -> None:
 # ---------------------------------------------------------------------- main
 
 def _api_key_configured() -> bool:
-    return bool(get_settings().deepseek_api_key)
+    """已配置手动 Key，或已配置 Worker 分发（两者满足其一即可开始学习）。"""
+    settings = get_settings()
+    return bool(settings.deepseek_api_key) or bool(settings.recallos_worker_url)
 
 
 def render_api_key_setup() -> None:

@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-v4-flash"
 
+    # V1.0 — Cloudflare Worker 临时 Key 分发（Worker 优先，手动 Key 兜底）。
+    # 配置后，客户端会先从 Worker 取 24h 有效的临时 Key；Worker 不可用/限额
+    # 用尽时回退到 deepseek_api_key。留空则完全走原有「手动 Key」路径。
+    recallos_worker_url: str = ""
+
     # HTTP behaviour
     # 30 秒超时：连接/读取/写入任一阶段超时都会抛 DeepSeekNetworkError（不再死等）。
     # 可通过环境变量 REQUEST_TIMEOUT 覆盖。

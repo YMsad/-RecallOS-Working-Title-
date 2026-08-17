@@ -19,6 +19,12 @@ from core.config import (
     save_api_key_to_config,
 )
 from core.database import configure, init_db
+from core.device_fingerprint import get_device_fingerprint
+from core.key_manager import (
+    DailyLimitExceeded,
+    KeyManager,
+    KeyManagerError,
+)
 from core.models import (
     MASTERY_LEARNING,
     MASTERY_UNCLEAR,
@@ -98,6 +104,10 @@ __all__ = [
     "DeepSeekRateLimitError",
     "DeepSeekAPIError",
     "DeepSeekNetworkError",
+    "KeyManager",
+    "KeyManagerError",
+    "DailyLimitExceeded",
+    "get_device_fingerprint",
     "Settings",
     "get_settings",
     "get_api_key_from_config",

@@ -161,7 +161,7 @@ def _ensure_api_key() -> bool:
 
     Returns True when a key is ready, False when the user quits.
     """
-    if get_settings().deepseek_api_key:
+    if get_settings().deepseek_api_key or get_settings().recallos_worker_url:
         return True
     while True:
         try:

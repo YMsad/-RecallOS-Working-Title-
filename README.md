@@ -127,6 +127,29 @@ DEEPSEEK_MODEL="deepseek-chat"
 
 > ⚠️ **注意**：不要将 `.env` 文件提交到 Git 或分享给他人，否则 API Key 可能泄露。
 
+### 4b. 可选：Cloudflare Worker 临时 Key 分发（V1.0）
+
+不想自己在 `.env` 里填 Key、又想给多台设备统一发 Key 时，可启用「Worker 优先 +
+手动 Key 兜底」：
+
+1. 部署 `workers/get-key.js`（`wrangler.toml` 已备好）：
+   ```bash
+   npm install -g wrangler
+   wrangler login
+   wrangler kv:namespace create "RECALLOS_KV"          # 把返回的 id 填进 wrangler.toml
+   wrangler deploy
+   ```
+2. 在 `.env` 增加一行：
+   ```ini
+   RECALLOS_WORKER_URL=https://你的子域.workers.dev
+   ```
+3. 客户端启动时自动向 Worker 取 24h 临时 Key（绑定设备指纹、每设备每日限额），
+   Worker 不可用 / 限额用尽时才回退 `.env` 里的 `DEEPSEEK_API_KEY`。
+
+用量监控与一键撤销（管理员）见 `scripts/monitor_usage.py`（每日定时跑 + Telegram 告警）。
+
+> ⚠️ **注意**：不要将 `.env` 文件提交到 Git 或分享给他人，否则 API Key 可能泄露。
+
 ### 5. 运行
 
 **方式一：一键启动脚本（自动检查 `.env`）**
