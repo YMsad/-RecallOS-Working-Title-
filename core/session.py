@@ -1286,6 +1286,9 @@ def restore_session(
                     break
         session.learner_state = LearnerState.from_dict(snapshot)
         session.learner_state.learning_goal = session.learning_goal
+        for sp in session.stuck_points:  # 阅读时自述的卡住点在恢复后继续生效
+            if sp not in session.learner_state.uncertain:
+                session.learner_state.uncertain.append(sp)
         if session.stage == "complete":
             session.phase = "connections"
         elif session.stage == "intervention":

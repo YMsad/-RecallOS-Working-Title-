@@ -717,6 +717,97 @@ def test_app_new_flow_reading_to_validation(monkeypatch, configured_app) -> None
     assert any("更简单的大白话" in m["text"] for m in at.session_state["messages"])
 
 
+def test_app_new_flow_home_goal_selector(configured_app) -> None:
+    """V0.3.1 — 首页可选学习目标；不选默认「理解概念」；选择会落库。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert at.radio[0].value == "🧠 理解概念"
+
+    at.radio[0].set_value("🛠 能实际应用").run()
+    assert not at.exception
+    at = _start_new_flow(at)
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.learning_goal == "apply"
+    assert database.get_concept(session.concept_id)["learning_goal"] == "apply"
+
+
+def test_app_new_flow_reading_signal_buttons_and_stuck(
+    monkeypatch, configured_app
+) -> None:
+    """V0.3.1 — 阅读阶段 🤔💡✓ 标记 + 卡住点输入，全部可选、不阻塞流程。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert at.session_state["session"].stage == "reading"
+
+    # 点「🤔 没看懂」→ 记录信号并落库，页面出现卡住点输入
+    at = at.button(key="v_rs_c_0").click().run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.reading_signals == [{"kind": "confused", "position": 0}]
+    assert database.get_concept(session.concept_id)["signals"]
+    assert "没看懂" in markdown_text(at)
+
+    # 输入卡住点并保存
+    at.text_input(key="v_stuck_text").input("边界不知道算不算").run()
+    assert not at.exception
+    at = click_by_label(at, "保存")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stuck_points == ["边界不知道算不算"]
+
+    # 再点「✓ 我懂了」也记录（混合信号不互相覆盖）
+    at = at.button(key="v_rs_k_0").click().run()
+    assert not at.exception
+    session = at.session_state["session"]
+    kinds = [s["kind"] for s in session.reading_signals]
+    assert kinds == ["confused", "clear"]
+
+    # 标记不影响流程：仍然可以正常开始验证
+    at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_intervention_feedback_ui(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 干预后 👍/🤔 反馈按钮可选；反馈写入 learner_state 并落库。"""
+    fake = FakeClient([])
+    fake.analysis_reply = {
+        "understanding_level": "relationship",
+        "understood": [],
+        "uncertain": ["边界不清"],
+        "misconceptions": [],
+        "last_response_quality": "partial",
+    }
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "intervention"
+    assert session.feedback_pending() is True
+
+    # 下一次干净 run 才渲染干预反馈按钮（处理回答那一 run 顶部还没到干预阶段）
+    at = at.run()
+    assert not at.exception
+    assert any("👍 清楚多了" in (b.label or "") for b in at.button)
+
+    # 提交「👍 清楚多了」反馈
+    at = click_by_label(at, "👍 清楚多了")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.intervention_feedback_list == [
+        {"action": "hint", "feedback": "clear"}
+    ]
+    assert (
+        session.learner_state.intervention_history[-1]["feedback"] == "clear"
+    )
+    assert database.get_concept(session.concept_id)["intervention_feedback"]
+
+
 def test_app_new_flow_validation_pass_goes_offer(monkeypatch, configured_app) -> None:
     fake = FakeClient([])
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)

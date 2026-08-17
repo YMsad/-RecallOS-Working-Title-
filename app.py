@@ -510,35 +510,25 @@ def _render_pre_answer_signals(session: LearningSession) -> None:
     全部可选、不阻塞：用户可以直接跳过用 chat_input 作答。
     """
     if session.stage == "validation" and session.should_ask_confidence():
-        with st.container():
-            st.markdown("### 🔮 猜一下")
-            st.caption("被提问之前先做个预测（可选，不猜也能继续）：")
-            pick = st.radio(
-                "验证前的信心预测",
-                ["😊 应该可以讲清楚", "🤔 不确定，容易卡住"],
-                horizontal=True,
-                key="v_conf_pick",
-            )
-            if st.button("记录预测", key="v_conf_ok"):
-                session.record_confidence_prediction(
-                    "clear" if pick.startswith("😊") else "unsure"
-                )
-                st.rerun()
+        st.markdown("### 🔮 猜一下")
+        st.caption("被提问之前先做个预测（可选，不猜也能继续）：")
+        c1, c2 = st.columns(2)
+        if c1.button("😊 应该可以讲清楚", key="v_conf_c", use_container_width=True):
+            session.record_confidence_prediction("😊 应该可以讲清楚")
+            st.rerun()
+        if c2.button("🤔 不确定，容易卡住", key="v_conf_u", use_container_width=True):
+            session.record_confidence_prediction("🤔 不确定，容易卡住")
+            st.rerun()
     elif session.stage == "intervention" and session.feedback_pending():
-        with st.container():
-            st.markdown("### 💬 小反馈")
-            st.caption("刚才的提示有帮到你吗？（可选，也可以直接回答）")
-            pick = st.radio(
-                "干预反馈",
-                ["👍 清楚多了", "🤔 还是有点懵"],
-                horizontal=True,
-                key="v_fb_pick",
-            )
-            if st.button("提交反馈", key="v_fb_ok"):
-                session.record_intervention_feedback(
-                    "clear" if "清楚多了" in pick else "unclear"
-                )
-                st.rerun()
+        st.markdown("### 💬 小反馈")
+        st.caption("刚才的提示有帮到你吗？（可选，也可以直接回答）")
+        c1, c2 = st.columns(2)
+        if c1.button("👍 清楚多了", key="v_fb_clear", use_container_width=True):
+            session.record_intervention_feedback("clear")
+            st.rerun()
+        if c2.button("🤔 还是有点懵", key="v_fb_unclear", use_container_width=True):
+            session.record_intervention_feedback("unclear")
+            st.rerun()
 
 
 def _reading_paragraphs(source_text: str) -> list[str]:
@@ -556,12 +546,17 @@ def _render_stuck_signal(session: LearningSession) -> None:
     pos_text = "，".join(f"第 {s['position'] + 1} 段" for s in confused[:5])
     if st.session_state.pop("v_stuck_saved", False):
         st.session_state["v_stuck_text"] = ""
-    with st.expander(f"❓ 哪里卡住了？（已标 {len(confused)} 处：{pos_text}）"):
-        stuck = st.text_input("用一句话说说你卡在哪（可选）", key="v_stuck_text")
-        if st.button("保存", key="v_stuck_save") and stuck.strip():
-            session.record_stuck_point(stuck.strip())
-            st.session_state["v_stuck_saved"] = True
-            st.rerun()
+    st.markdown(f"❓ 你标了 {len(confused)} 处「没看懂」：{pos_text}")
+    stuck = st.text_input(
+        "用一句话说说你卡在哪（可选）",
+        key="v_stuck_text",
+        placeholder="比如：机会成本到底只算最优那一个还是都算？",
+    )
+    c_ok, _ = st.columns([1, 5])
+    if c_ok.button("保存", key="v_stuck_save") and stuck.strip():
+        session.record_stuck_point(stuck.strip())
+        st.session_state["v_stuck_saved"] = True
+        st.rerun()
 
 
 def _render_learning_new(session: LearningSession) -> None:

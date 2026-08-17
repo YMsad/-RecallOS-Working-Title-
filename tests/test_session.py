@@ -950,3 +950,144 @@ def test_restore_new_flow_complete_sets_connections_phase() -> None:
     assert restored.phase == "connections"
     assert restored.learner_state.understanding_level == "relationship"
     assert restored.current_intervention() is None
+
+
+# ------------------------------------------------------ V0.3.1 user signals
+
+
+def test_learning_goal_stored_and_restored() -> None:
+    """学习目标可选；不选/非法取值回退 understand，且随会话恢复。"""
+    session = LearningSession("机会成本", "原文", learning_goal="apply")
+    assert session.learning_goal == "apply"
+    cid = session.begin()
+
+    row = database.get_concept(cid)
+    assert row["learning_goal"] == "apply"
+
+    restored = restore_session(cid)
+    assert restored.learning_goal == "apply"
+    assert restored.learner_state.learning_goal == "apply"
+
+    fallback = LearningSession("x", "y", learning_goal="bogus")
+    assert fallback.learning_goal == "understand"
+    default = LearningSession("x", "y")
+    assert default.learning_goal == "understand"
+
+
+def test_reading_signals_persist_and_restore() -> None:
+    """阅读阶段的 🤔💡✓ 标记与卡住点：记录、落库、恢复后可用。"""
+    session = LearningSession("机会成本", "段一\n\n段二\n\n段三")
+    cid = session.begin()
+    session.record_reading_signal("confused", 0)
+    session.record_reading_signal("clear", 2)
+    session.record_stuck_point("机会成本到底只算最优那一个还是都算")
+
+    assert session.reading_signals == [
+        {"kind": "confused", "position": 0},
+        {"kind": "clear", "position": 2},
+    ]
+    assert session.stuck_points == ["机会成本到底只算最优那一个还是都算"]
+    assert session.learner_state.uncertain == ["机会成本到底只算最优那一个还是都算"]
+
+    restored = restore_session(cid)
+    assert restored.reading_signals == [
+        {"kind": "confused", "position": 0},
+        {"kind": "clear", "position": 2},
+    ]
+    assert restored.stuck_points == ["机会成本到底只算最优那一个还是都算"]
+    assert "机会成本到底只算最优那一个还是都算" in restored.learner_state.uncertain
+
+
+def test_reading_signals_ignore_blank_stuck_point() -> None:
+    session, _ = make_session()
+    cid = session.begin()
+    session.record_stuck_point("   ")
+    assert session.stuck_points == []
+    assert not database.get_concept(cid)["signals"]
+
+
+def test_confidence_prediction_recorded_and_calibrated() -> None:
+    """验证前信心预测：记录 attempt/prediction，判级后回填 actual_level。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.record_confidence_prediction("😊 应该可以讲清楚")
+
+    assert session.confidence_predictions == [
+        {"attempt": 1, "prediction": "😊 应该可以讲清楚"}
+    ]
+    assert session.should_ask_confidence() is False  # 记录后不再重复追问
+
+    session.submit_validation("回答")
+    assert session.confidence_predictions[-1]["actual_level"] == "relationship"
+
+    payload = json.loads(database.get_concept(cid)["signals"])
+    assert payload["confidence"][-1]["attempt"] == 1
+    assert payload["confidence"][-1]["actual_level"] == "relationship"
+
+
+def test_should_ask_confidence_is_boolean() -> None:
+    s1, _ = make_session()
+    s1.begin()
+    assert isinstance(s1.should_ask_confidence(), bool)
+
+
+def test_intervention_feedback_recorded_in_history() -> None:
+    """干预后反馈：写入 feedback 列表、learner_state.intervention_history，且可恢复。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    assert session.stage == "intervention"
+
+    session.record_intervention_feedback("unclear")
+    assert session.intervention_feedback_list == [
+        {"action": "counterexample", "feedback": "unclear"}
+    ]
+    assert (
+        session.learner_state.intervention_history[-1]["feedback"] == "unclear"
+    )
+    assert session.feedback_pending() is False  # 已反馈过，不再追问
+
+    row = database.get_concept(cid)
+    assert json.loads(row["intervention_feedback"]) == [
+        {"action": "counterexample", "feedback": "unclear"}
+    ]
+
+    restored = restore_session(cid)
+    assert restored.intervention_feedback_list == [
+        {"action": "counterexample", "feedback": "unclear"}
+    ]
+    # 恢复后 `_current_intervention` 重置为 None，因此不再询问该反馈
+    assert restored.feedback_pending() is False
+
+
+def test_decider_prompt_uses_past_intervention_feedback() -> None:
+    """干预决策器收到过往反馈，优先避开被说「还是有点懵」的方式。"""
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("counterexample", "反例：三个选择怎么算？"),
+        update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
+        intervention_reply("example", "例子：你想买电脑时的取舍"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    session.record_intervention_feedback("unclear")
+    session.submit_intervention_answer("我的回答")
+
+    contents = [p["messages"][1]["content"] for p in transport.requests]
+    deciders = [
+        c for c in contents if "最小干预决策器" in c and "用户对已给干预的反馈" in c
+    ]
+    assert deciders, "期待决策器收到干预反馈历史"
+    assert "counterexample" in deciders[-1]
+    assert "unclear" in deciders[-1]

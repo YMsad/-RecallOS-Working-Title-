@@ -310,6 +310,46 @@ def test_learner_state_analyzer_prompt_includes_context_when_given() -> None:
     assert "此前对话" in prompt
 
 
+def test_analyzer_prompt_includes_user_signals() -> None:
+    """V0.3.1 — 分析器携带学习目标 / 卡住点 / 信心预测。"""
+    prompt = learner_state_analyzer_prompt(
+        source_text="S",
+        concept="机会成本",
+        task="T",
+        user_answer="A",
+        learning_goal="apply",
+        stuck_points="机会成本只算最优那一个吗",
+        confidence_prediction="😊 应该可以讲清楚",
+    )
+    assert "能实际应用" in prompt  # apply 的目标提示
+    assert "机会成本只算最优那一个吗" in prompt
+    assert "😊 应该可以讲清楚" in prompt
+
+    plain = learner_state_analyzer_prompt(
+        source_text="S", concept="X", task="T", user_answer="A"
+    )
+    assert "能实际应用" not in plain  # 默认 understand，不给 apply 目标
+    assert "目标：理解概念本身" in plain
+
+
+def test_intervention_decider_prompt_includes_feedback_history() -> None:
+    """V0.3.1 — 决策器收到过往干预反馈。"""
+    prompt = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        intervention_history='[{"action": "counterexample", "feedback": "unclear"}]',
+    )
+    assert "用户对已给干预的反馈" in prompt
+    assert '"action": "counterexample"' in prompt
+    assert "unclear" in prompt
+
+    plain = intervention_decider_prompt(
+        source_text="S", concept="X", learner_state="{}"
+    )
+    assert "用户对已给干预的反馈" not in plain
+
+
 def test_learner_state_analysis_validates() -> None:
     result = validate_response(
         '{"understanding_level": "relationship", "understood": ["理解了关系"], '
@@ -354,6 +394,21 @@ def test_learner_state_updater_prompt_requests_json() -> None:
     assert "学习状态更新器" in prompt
     assert '"next_best_action"' in prompt
     assert '"understanding_level"' in prompt
+
+
+def test_learner_state_updater_prompt_includes_goal() -> None:
+    """V0.3.1 — 更新器携带学习目标，作为达标判定尺度。"""
+    prompt = learner_state_updater_prompt(
+        source_text="S", concept="机会成本", intervention="提示",
+        user_answer="A", learner_state="{}", learning_goal="exam",
+    )
+    assert "为考试掌握" in prompt
+    assert "术语准确" in prompt
+    default = learner_state_updater_prompt(
+        source_text="S", concept="机会成本", intervention="提示",
+        user_answer="A", learner_state="{}",
+    )
+    assert "为考试掌握" not in default
 
 
 def test_learner_state_update_validates() -> None:
