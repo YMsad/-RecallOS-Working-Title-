@@ -50,6 +50,7 @@ from core.prompts import (
     intervention_decider_prompt,
     learner_state_analyzer_prompt,
     learner_state_updater_prompt,
+    validation_feedback_prompt,
     opening_question_prompt,
     question_prompt,
     reference_answer_prompt,
@@ -221,6 +222,7 @@ class LearningSession:
 
         # V0.3.1 — 用户信号输入（全部可选，不阻塞学习流程）
         self.reading_signals: list[dict[str, Any]] = []
+        self.reading_answers: list[dict[str, Any]] = []
         self.stuck_points: list[str] = []
         self.confidence_predictions: list[dict[str, Any]] = []
         self.intervention_feedback_list: list[dict[str, Any]] = []
@@ -419,8 +421,9 @@ class LearningSession:
     def finish_auto(self) -> SummaryResult:
         """V0.3.1 — 学习完成即自动生成总结，无需用户再输入「自己的话」。
 
-        以验证/干预回答中最新的理解为「我的理解」素材，直接生成每日总结
-        （breakthrough + tomorrow_hook）并落库。
+        以验证回答中最新的理解为「我的理解」素材（无时代之以阅读答案），
+        加上阅读阶段每一段的「自己的话」作为上下文，直接生成每日总结
+        （breakthrough + plain + tomorrow_hook）并落库。
         """
         cid = self._require_started()
         if self.stage != "complete":
@@ -431,15 +434,20 @@ class LearningSession:
             if entry.get("answer"):
                 definition = str(entry["answer"])
                 break
+        if not definition and self.reading_answers:
+            definition = str(self.reading_answers[-1].get("answer") or "")
         prompt = summary_prompt(
             title=self.title,
             user_definition=definition,
             qa_history=self._format_new_flow_history(),
+            reading_answers=self._reading_answers_context(),
         )
         reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
         self.summary = validate_response(reply, SummaryResult)
 
-        save_daily_summary(cid, self.summary.breakthrough, self.summary.tomorrow_hook)
+        save_daily_summary(
+            cid, self.summary.breakthrough, self.summary.tomorrow_hook
+        )
         mastery = MASTERY_UNCLEAR if self.marked_uncertain else MASTERY_UNDERSTOOD
         update_concept(
             cid,
@@ -450,6 +458,17 @@ class LearningSession:
         self.phase = "finished"
         logger.info("Session auto-finished for concept %s (mastery=%s)", self.title, mastery)
         return self.summary
+
+    def _reading_answers_context(self) -> str:
+        """Format recorded reading answers as compact prompt context."""
+        if not self.reading_answers:
+            return ""
+        lines = [
+            f"- 第 {int(e['paragraph_index']) + 1} 段：{e.get('answer', '')}"
+            for e in self.reading_answers
+            if e.get("answer")
+        ]
+        return "\n".join(lines)
 
     # ----------------------------------------------------- V0.3.0 validation
 
@@ -467,6 +486,7 @@ class LearningSession:
             source_text=self.source_text,
             concept=self.title,
             text_type=self.text_type or "",
+            reading_answers=self._reading_answers_context(),
         )
         reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "设计验证任务")
         task = self._parse_or_raise(reply, ValidationTask, "验证任务")
@@ -520,6 +540,66 @@ class LearningSession:
         if text not in self.learner_state.uncertain:
             self.learner_state.uncertain.append(text)
         self._persist_new_flow()
+
+    def record_reading_answer(self, paragraph_index: int, answer: str) -> None:
+        """V0.3.1 修复 — 记录用户在阅读阶段对某段的理解。
+
+        ``paragraph_index`` is the 0-based index of the paragraph, ``answer`` is
+        the learner's own one-line summary. These records are persisted to the
+        ``concepts.reading_answers`` column, used as extra context for the
+        validation task, and fed into the auto-generated summary.
+        """
+        paragraph_index = int(paragraph_index)
+        answer = answer.strip()
+        if not answer:
+            return
+        self.reading_answers = [
+            e for e in self.reading_answers if e.get("paragraph_index") != paragraph_index
+        ]
+        self.reading_answers.append(
+            {"paragraph_index": paragraph_index, "answer": answer}
+        )
+        self.reading_answers.sort(key=lambda e: int(e.get("paragraph_index", 0)))
+        self._save_reading_answers()
+
+    def reading_answer_text(self, paragraph_index: int) -> str | None:
+        """Return the recorded one-line understanding for a paragraph, or None."""
+        for e in self.reversed_reading_answers():
+            if e.get("paragraph_index") == int(paragraph_index):
+                return str(e.get("answer") or "")
+        return None
+
+    def reading_answer_count(self) -> int:
+        """Number of paragraphs for which the learner left an understanding."""
+        return sum(1 for e in self.reading_answers if e.get("answer"))
+
+    def reversed_reading_answers(self) -> list[dict[str, Any]]:
+        """Reading answers newest first (for prompt context)."""
+        return list(reversed(self.reading_answers))
+
+    def _save_reading_answers(self) -> None:
+        """Persist reading answers into the concepts.reading_answers column."""
+        if not self.reading_answers:
+            return
+        if self.concept_id is None:
+            return
+        update_concept(
+            self.concept_id,
+            reading_answers=json.dumps(self.reading_answers, ensure_ascii=False),
+        )
+
+    def _load_reading_answers(self) -> None:
+        """Restore reading answers from the concepts.reading_answers column."""
+        if self.concept_id is None:
+            return
+        concept = get_concept(self.concept_id)
+        if concept and concept.get("reading_answers"):
+            import json as _json
+
+            try:
+                self.reading_answers = _json.loads(concept["reading_answers"])
+            except (TypeError, ValueError):
+                self.reading_answers = []
 
     def should_ask_confidence(self) -> bool:
         """Whether the occasionally-appearing confidence question should show now."""
@@ -641,7 +721,13 @@ class LearningSession:
         intervention = self._decide_intervention(mode="validation")
         if intervention is None:
             return self._finish_new_flow()
-        return self._apply_intervention(intervention)
+        result = self._apply_intervention(intervention)
+        # V0.3.1 hotfix — 有缺口时先给出具体、有对比的反馈，再接最小干预，
+        # 而不是只说「理解不到位」。反馈生成失败时自动降级为模板反馈。
+        if result.get("stage") == "intervention":
+            feedback = self.validation_feedback(answer)
+            result["bubble"] = f"{feedback}\n\n{result['bubble']}"
+        return result
 
     def ask_simplify(self) -> str:
         """Give a one-notch-simpler plain-language explanation of the concept.
@@ -921,6 +1007,52 @@ class LearningSession:
 
     # ------------------------------------------------------------- v2 internals
 
+    def validation_feedback(self, answer: str) -> str:
+        """V0.3.1 hotfix — 生成具体、可行动、有对比的验证反馈（纯文本）。
+
+        只在验证回答存在理解缺口时调用，用来解释「为什么没到位」。
+        AI 失败时降级为基于 Learner State 的模板反馈，绝不阻塞干预流程。
+        """
+        try:
+            reply = self.client.chat(
+                build_messages(
+                    validation_feedback_prompt(
+                        concept_title=self.title,
+                        user_answer=answer,
+                        task_description=self.validation_task
+                        or "用自己的话解释这个概念",
+                        reading_answers=self.reading_answers or None,
+                    )
+                ),
+                temperature=OTHER_TEMPERATURE,
+            )
+            feedback = reply.strip()
+            if not feedback:
+                raise ValueError("empty validation feedback")
+            return feedback
+        except (DeepSeekError, ValueError):
+            logger.warning(
+                "Validation feedback generation failed for concept %s — fallback",
+                self.title,
+            )
+            return self._fallback_validation_feedback(answer)
+
+    def _fallback_validation_feedback(self, answer: str) -> str:
+        """降级反馈：不依赖 AI，用 Learner State 的缺口给出可行动提示。"""
+        ls = self.learner_state
+        notes: list[str] = []
+        if ls.misconceptions:
+            notes.append(f"**可能需要调整：**\n- " + "\n- ".join(ls.misconceptions))
+        if ls.uncertain:
+            notes.append(f"**还没完全说清：**\n- " + "\n- ".join(ls.uncertain))
+        if not notes:
+            notes.append("我们已经接近目标了，再往前一步就能完全掌握。")
+        return (
+            f"**你的回答提到了：**\n{answer.strip() or '（没有留下具体内容）'}\n\n"
+            + "\n\n".join(notes)
+            + "\n\n我们再看一个更具体的例子，把最后一环补上。"
+        )
+
     def _analyze_learner(self, answer: str) -> LearnerStateAnalysis:
         # 卡住点在进入分析前先落入 uncertain，并一并喂给分析器，避免被覆盖丢失
         for sp in self.stuck_points:
@@ -1008,6 +1140,7 @@ class LearningSession:
                     ensure_ascii=False,
                 ),
                 minimum_action=minimum_action,
+                answer_richness=self._calculate_answer_richness(self._last_user_answer()),
             ),
             QUESTION_TEMPERATURE,
             "决定最小干预",
@@ -1058,6 +1191,33 @@ class LearningSession:
         if final_intervention and final_intervention.get("content"):
             result["final_note"] = _intervention_message(final_intervention)
         return result
+
+    def _calculate_answer_richness(self, answer: str) -> str:
+        """V0.3.1 hotfix — 按回答丰富度分级深化追问的起点。
+
+        - ``<30`` 字 → "simple"（生活类比：这就像什么？）
+        - ``30–80`` 字 → "moderate"（联系：这和什么有关？）
+        - ``>80`` 字且有例子 → "rich"（反事实：如果没有它会怎样？）
+        """
+        text = (answer or "").strip()
+        length = len(text)
+        if length < 30:
+            return "simple"
+        if length > 80 and self._has_example(text):
+            return "rich"
+        return "moderate"
+
+    @staticmethod
+    def _has_example(text: str) -> bool:
+        return any(k in text for k in ("比如", "例如", "比方", "举个例子", "打个比方"))
+
+    def _last_user_answer(self) -> str:
+        """最近一次用户输出（验证回答或干预回答），供丰富度分级使用。"""
+        if self.deeper_history:
+            return self.deeper_history[-1].get("answer", "")
+        if self.validation_history:
+            return self.validation_history[-1].get("answer", "")
+        return ""
 
     def _format_learner_context(self) -> str:
         """Compact context for the analyzer/decider/updater prompts."""
@@ -1166,6 +1326,11 @@ class LearningSession:
                     or self.stuck_points
                     or self.confidence_predictions
                 )
+                else None
+            ),
+            reading_answers=(
+                json.dumps(self.reading_answers, ensure_ascii=False)
+                if self.reading_answers
                 else None
             ),
         )
@@ -1368,6 +1533,7 @@ def restore_session(
     if feedback_payload:
         session.intervention_feedback_list = [dict(x) for x in feedback_payload]
     session.restore_signals(_load_json_dict(concept.get("signals")))
+    session.reading_answers = _load_json_list(concept.get("reading_answers"))
 
     # 通用部分：重建旧流程追问历史（新流程里同样作为补充上下文）
     history = get_qa_history(concept_id)

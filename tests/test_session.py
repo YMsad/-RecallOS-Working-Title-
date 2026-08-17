@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from core import database
-from core.client import DeepSeekClient
+from core.client import DeepSeekClient, DeepSeekError
 from core.config import Settings
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 from core.session import (
@@ -121,6 +121,11 @@ def offer_reply(offer: str = "要不要再挖一层？") -> httpx.Response:
     return text_reply(
         json.dumps({"offer": offer, "options": ["深入", "先到这里"]}, ensure_ascii=False)
     )
+
+
+def feedback_reply(text: str = "你的回答提到了：……") -> httpx.Response:
+    """验证反馈（V0.3.1 hotfix）—— 纯文本，不校验 JSON。"""
+    return text_reply(text)
 
 
 @pytest.fixture(autouse=True)
@@ -584,12 +589,16 @@ def test_submit_validation_gap_moves_to_intervention() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"], misconceptions=["混淆了机会成本与沉没成本"]),
         intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        feedback_reply("**你的回答提到了：**\n- 决策\n\n但机会成本的核心在于放弃的最佳替代。"),
     )
     cid = session.begin()
     session.start_validation()
     result = session.submit_validation("回答")
     assert result["stage"] == "intervention"
     assert "如果放弃三个选择" in result["bubble"]
+    # V0.3.1 hotfix — 反馈在前，干预在后
+    assert "你的回答提到了" in result["bubble"]
+    assert result["bubble"].index("你的回答提到了") < result["bubble"].index("如果放弃三个选择")
     assert session.stage == "intervention"
     assert session.validation_passed is False
     assert session.current_intervention()["action"] == "counterexample"
@@ -598,6 +607,43 @@ def test_submit_validation_gap_moves_to_intervention() -> None:
     payloads = [p["messages"][1]["content"] for p in transport.requests]
     assert any("学习者状态分析器" in p for p in payloads)
     assert any("最小干预决策器" in p for p in payloads)
+    assert any("苏格拉底式导师" in p for p in payloads)
+
+
+def test_validation_feedback_failure_falls_back_without_blocking() -> None:
+    """V0.3.1 hotfix — 反馈 AI 失败时降级为模板反馈，干预流程不被阻塞。"""
+
+    class FailingFeedbackClient:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def chat(self, messages, **kwargs):
+            if "苏格拉底式导师" in messages[1]["content"]:
+                raise DeepSeekError("模拟反馈失败")
+            return self._inner.chat(messages, **kwargs)
+
+    transport = ScriptedTransport(
+        [
+            validation_task_reply("任务"),
+            analysis_reply("relationship", uncertain=["边界不清"]),
+            intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        ]
+    )
+    inner = DeepSeekClient(
+        settings=TEST_SETTINGS, transport=httpx.MockTransport(transport.handler)
+    )
+    session = LearningSession(
+        "机会成本", "原文：选择意味着放弃", client=FailingFeedbackClient(inner)
+    )
+    cid = session.begin()
+    session.start_validation()
+    result = session.submit_validation("回答")
+    assert result["stage"] == "intervention"
+    # 降级模板反馈（含 Learner State 的缺口）+ 干预仍完整
+    assert "你的回答提到了" in result["bubble"]
+    assert "还没完全说清" in result["bubble"]
+    assert "如果放弃三个选择" in result["bubble"]
+    assert session.current_intervention()["action"] == "counterexample"
 
 
 def test_submit_validation_closing_note_finishes() -> None:
@@ -733,6 +779,7 @@ def test_next_intervention_continues_after_restore() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界"], misconceptions=["混淆"]),
         intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        feedback_reply("你的回答提到了：边界问题"),
         intervention_reply("question", "机会成本里的“成本”指的是什么？"),
     )
     cid = session.begin()
@@ -900,6 +947,7 @@ def test_restore_new_flow_validation_preserves_state() -> None:
         validation_task_reply("任务", "summary", 2),
         analysis_reply("relationship", uncertain=["边界"]),
         intervention_reply("hint", "想一想成本指的是什么"),
+        feedback_reply("你的回答提到了：……"),
     )
     cid = session.begin()
     session.start_validation()
@@ -996,6 +1044,58 @@ def test_finish_auto_requires_complete_stage() -> None:
     session.begin()
     with pytest.raises(SessionError, match="complete"):
         session.finish_auto()
+
+
+def test_record_reading_answer_persists_and_restores() -> None:
+    """V0.3.1 修复 — 阅读答案按段落记录、同段重写替换、落库并可恢复。"""
+    session, _ = make_session(source="段落一\n\n段落二")
+    cid = session.begin()
+    session.record_reading_answer(0, "第一段说的是机会成本的定义")
+    session.record_reading_answer(1, "第二段讲选择的代价")
+    session.record_reading_answer(0, "机会成本就是放弃的次优选择")
+
+    saved = json.loads(database.get_concept(cid)["reading_answers"])
+    assert [e["paragraph_index"] for e in saved] == [0, 1]
+    assert saved[0]["answer"] == "机会成本就是放弃的次优选择"
+    assert session.reading_answer_count() == 2
+
+    restored = restore_session(cid)
+    assert restored.reading_answer_text(0) == "机会成本就是放弃的次优选择"
+    assert restored.reading_answer_text(1) == "第二段讲选择的代价"
+    assert restored.reading_answers == session.reading_answers
+
+
+def test_reading_answers_feed_finish_auto_prompt() -> None:
+    """V0.3.1 修复 — 阅读答案作为上下文进总结 prompt，补充验证回答。"""
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["核心"], quality="deep"),
+        summary_reply("我终于搞懂了机会成本", "明天想一个反例"),
+    )
+    cid = session.begin()
+    session.record_reading_answer(0, "机会成本就是放弃的选项")
+    session.start_validation()
+    session.submit_validation("选A就失去了B")
+    assert session.stage == "complete"
+
+    session.finish_auto()
+    assert session.phase == "finished"
+    payload = transport.requests[2]["messages"][1]["content"]
+    assert "机会成本就是放弃的选项" in payload  # 阅读答案进 prompt
+    assert "选A就失去了B" in payload
+    assert database.get_concept(cid)["user_definition"] == "选A就失去了B"
+
+
+def test_record_reading_answer_fallback_for_definition() -> None:
+    """V0.3.1 修复 — 没有验证回答时，阅读答案兜底为「我的理解」。"""
+    session, _ = make_session(
+        summary_reply("我终于搞懂了机会成本", "明天想一个反例"),
+    )
+    cid = session.begin()
+    session.record_reading_answer(0, "机会成本就是放弃的次优选择")
+    session.stage = "complete"
+    session.finish_auto()
+    assert database.get_concept(cid)["user_definition"] == "机会成本就是放弃的次优选择"
 
 
 # ------------------------------------------------------ V0.3.1 user signals
@@ -1119,6 +1219,7 @@ def test_intervention_feedback_recorded_in_history() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        feedback_reply("你的回答提到了：……"),
     )
     cid = session.begin()
     session.start_validation()
@@ -1153,6 +1254,7 @@ def test_decider_prompt_uses_past_intervention_feedback() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("counterexample", "反例：三个选择怎么算？"),
+        feedback_reply("你的回答提到了：……"),
         update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
         intervention_reply("example", "例子：你想买电脑时的取舍"),
     )
@@ -1183,6 +1285,7 @@ def test_ineffective_intervention_records_and_escalates_floor() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("hint", "提示：成本指的是什么"),
+        feedback_reply("你的回答提到了：……"),
         update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
         intervention_reply("hint", "提示：再想想边界"),  # 低于最低级别，应被抬升
     )
@@ -1221,6 +1324,7 @@ def test_two_ineffective_interventions_finish() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("hint", "提示1"),
+        feedback_reply("你的回答提到了：……"),
         update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
         intervention_reply("question", "提问：边界到底怎么算？"),  # floor=example，question 以更强级别继续
         update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
@@ -1249,6 +1353,7 @@ def test_effective_intervention_resets_counter() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("hint", "提示"),
+        feedback_reply("你的回答提到了：……"),
         update_reply("application", understood=["会用"], next_best_action="none"),
     )
     session.begin()
@@ -1272,6 +1377,7 @@ def test_escalation_caps_at_top_of_ladder() -> None:
         validation_task_reply("任务"),
         analysis_reply("relationship", uncertain=["边界不清"]),
         intervention_reply("question", "提问1"),
+        feedback_reply("你的回答提到了：……"),
         update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
         intervention_reply("none", "到这里吧，明天复习再推进。", requires_user_response=False),
     )
@@ -1284,3 +1390,37 @@ def test_escalation_caps_at_top_of_ladder() -> None:
     # question 之上没有更高级别 → minimum_action 为空 → AI 的 none 收尾生效
     assert result["stage"] == "complete"
     assert "到这里吧" in result["final_note"]
+
+
+def test_calculate_answer_richness_by_length_and_example() -> None:
+    """V0.3.1 hotfix — 回答丰富度分级：<30→simple；30–80→moderate；>80 且有例子→rich。"""
+    session, _ = make_session()
+
+    assert session._calculate_answer_richness("机会成本") == "simple"
+    assert session._calculate_answer_richness(
+        "机会成本就是当你选了A，就必须放弃B，要权衡的是被你放弃的那个次优选项的价值"
+    ) == "moderate"
+    long_no_example = "机会成本是当你在多个选项之间做选择时，被你放弃的那个最优选项所代表的价值，" * 3
+    assert len(long_no_example) > 80
+    assert session._calculate_answer_richness(long_no_example) == "moderate"
+    long_with_example = long_no_example + "比如你选择读书，就放弃了打工赚的钱。"
+    assert session._calculate_answer_richness(long_with_example) == "rich"
+
+
+def test_decider_prompt_uses_last_answer_richness() -> None:
+    """V0.3.1 hotfix — 干预决策 prompt 带上上一条回答的丰富度。"""
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("counterexample", "如果放弃三个选择，机会成本是三个加起来吗？"),
+        feedback_reply("你的回答提到了：……"),
+    )
+    session.begin()
+    session.start_validation()
+    session.submit_validation("机会成本")
+    prompt = next(
+        p["messages"][1]["content"] for p in transport.requests
+        if "最小干预决策器" in p["messages"][1]["content"]
+    )
+    assert "丰富度" in prompt
+    assert "simple" in prompt  # 「机会成本」<30 字 → simple

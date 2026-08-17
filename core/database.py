@@ -182,6 +182,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("learning_goal", "learning_goal TEXT"),
         ("intervention_feedback", "intervention_feedback TEXT"),
         ("signals", "signals TEXT"),
+        # ---- V0.3.1 修复 — 阅读阶段逐段引导问题的回答（JSON 列表）----
+        ("reading_answers", "reading_answers TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE concepts ADD COLUMN {ddl}")
@@ -254,6 +256,7 @@ def update_concept(
     learning_goal: str | None = None,
     intervention_feedback: str | None = None,
     signals: str | None = None,
+    reading_answers: str | None = None,
 ) -> bool:
     """Update any subset of a concept's fields. Returns True if a row changed."""
     if mastery is not None and mastery not in MASTERY_VALUES:
@@ -307,6 +310,8 @@ def update_concept(
         fields["intervention_feedback"] = intervention_feedback
     if signals is not None:
         fields["signals"] = signals
+    if reading_answers is not None:
+        fields["reading_answers"] = reading_answers
     if not fields:
         return True
     set_clause = ", ".join(f"{key} = ?" for key in fields)

@@ -97,6 +97,8 @@ class FakeClient:
             return json.dumps(self.task_reply, ensure_ascii=False)
         if "学习者状态分析器" in user:
             return json.dumps(self.analysis_reply, ensure_ascii=False)
+        if "苏格拉底式导师" in user:
+            return "**你的回答提到了：**\n- 决策\n\n**但机会成本的核心在于：**\n放弃的最佳替代\n\n**试着想想这个例子：**\n买电影票\n\n**所以：**\n方向对但需要调整"
         if "最小干预决策器" in user:
             return json.dumps(self.decider_reply, ensure_ascii=False)
         if "学习状态更新器" in user:
@@ -703,7 +705,7 @@ def test_app_new_flow_reading_to_validation(monkeypatch, configured_app) -> None
     assert any("阅读中" in (i.value or "") for i in at.info)
     assert any("先读原文" in m["text"] for m in at.session_state["messages"])
 
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     assert not at.exception
     assert at.session_state["session"].stage == "validation"
     assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
@@ -731,22 +733,46 @@ def test_app_new_flow_home_goal_selector(configured_app) -> None:
 
 
 def test_app_new_flow_reading_split_with_guidance(monkeypatch, configured_app) -> None:
-    """V0.3.1 — 阅读拆段+逐段引导：信号按钮与卡住点输入已移除，改为引导提示。"""
+    """V0.3.1 修复 — 阅读拆段 + 每段引导问题：不再纯读，而是用自己的话总结一句。"""
     fake = FakeClient([])
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
     assert at.session_state["session"].stage == "reading"
 
-    # 拆段展示 + 逐段引导提示
+    # 拆段展示 + 每段一个引导 text_input
     assert "第 1 段 / 共 1 段" in markdown_text(at)
-    assert any("读这一段时" in (c.value or "") for c in at.caption)
+    assert any(t.key == "v_read_ans_0" for t in at.text_input)
+    assert any("这段在说什么" in (t.label or "") for t in at.text_input)
     # 阅读信号按钮（🤔💡✓）与卡住点输入不再出现
     assert not any(b.key and b.key.startswith("v_rs_") for b in at.button)
     assert not any(t.key == "v_stuck_text" for t in at.text_input)
 
     # 阅读不阻塞：仍然可以正常开始验证
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_answer_recorded(monkeypatch, configured_app) -> None:
+    """V0.3.1 修复 — 每段引导问题的回答被记录并落库 reading_answers。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert at.session_state["session"].stage == "reading"
+
+    at.text_input[0].input("机会成本就是选择放弃的那个代价").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.reading_answer_text(0) == "机会成本就是选择放弃的那个代价"
+    saved = json.loads(database.get_concept(session.concept_id)["reading_answers"])
+    assert saved[0]["paragraph_index"] == 0
+    assert saved[0]["answer"] == "机会成本就是选择放弃的那个代价"
+    assert any("已记录 1/1" in (c.value or "") for c in at.caption)
+
+    # 点击开始验证后 stage 前进，不受记录影响
+    at = click_by_label(at, "我读完了")
     assert not at.exception
     assert at.session_state["session"].stage == "validation"
 
@@ -766,6 +792,111 @@ def test_app_new_flow_reading_no_source_skips_to_validation(monkeypatch, configu
     assert at.session_state["session"].stage == "validation"
 
 
+def test_app_new_flow_reading_pages_one_paragraph(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 阅读一次一段：进度条 + 上/下一段导航 + 我读完了，不再一次性铺开。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃。\n\n机会成本就是被放弃的那个最好的选择。")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    # 只显示第一段 + 进度 + 导航按钮，不渲染对话气泡
+    assert at.session_state["v_read_index"] == 0
+    assert "第 1 段 / 共 2 段" in markdown_text(at)
+    assert any(t.key == "v_read_ans_0" for t in at.text_input)
+    assert len(at.chat_message) == 0
+    assert any("上一段" in (b.label or "") for b in at.button)
+    assert any("下一段" in (b.label or "") for b in at.button)
+
+    # 记下第一段理解后切到第二段
+    at.text_input[0].input("第一段总结").run()
+    assert not at.exception
+    at = click_by_label(at, "下一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 1
+    assert "第 2 段 / 共 2 段" in markdown_text(at)
+    assert any(t.key == "v_read_ans_1" for t in at.text_input)
+    assert at.session_state["session"].reading_answer_text(0) == "第一段总结"
+
+    # 能回退，且每段回答被记录到对应段
+    at = click_by_label(at, "上一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 0
+    at.text_input[0].input("第一段总结(修订)").run()
+    assert at.session_state["session"].reading_answer_text(0) == "第一段总结(修订)"
+
+    # 读完开始验证
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_show_keys_collapses_paragraph(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 阅读「📋 只看重点」：打开后只显示关键句，原文收进展开面板。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("自定义概念")
+    at.text_area[0].input(
+        "第一句讲主干。第二句讲细节。第三句有「关键点」。第四句再补充例子。第五句最后收尾总结。"
+    )
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    # 默认完整段落直接展示
+    assert "第五句最后收尾总结" in markdown_text(at)
+    assert not any("展开原文" in (e.label or "") for e in at.expander)
+
+    # 打开只看重 点 → 只渲染关键句（含「关键点」的句子被选中），全文收进展开面板
+    show_keys = next(t for t in at.toggle if "只看重点" in (t.label or ""))
+    at = show_keys.set_value(True).run()
+    assert not at.exception
+    md = markdown_text(at)
+    assert "第三句有" in md
+    assert "- 第一句讲主干。" in md
+    assert any("展开原文" in (e.label or "") for e in at.expander)
+
+
+def test_app_builtin_reading_bold_and_pagination(configured_app) -> None:
+    """V0.3.1 hotfix — 内置概念阅读：关键词加粗保留 + 多段一次一段导航。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = at.button(key="builtin_opportunity_cost").click().run()
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    assert "**机会成本**" in markdown_text(at)
+    assert "第 1 段 / 共 4 段" in markdown_text(at)
+    assert any("只看重点" in (t.label or "") for t in at.toggle)
+    assert any("下一段" in (b.label or "") for b in at.button)
+
+    at = click_by_label(at, "下一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 1
+    assert "第 2 段 / 共 4 段" in markdown_text(at)
+
+
+def test_app_new_flow_complete_hides_chat_bubbles(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 完成阶段只留成功消息+简短确认+「查看今日总结」，隐藏对话气泡。"""
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    assert at.session_state["session"].stage == "complete"
+
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    assert any("明天到点我会提醒你" in (c.value or "") for c in at.caption)
+    assert len(at.chat_message) == 0
+    assert any("查看今日总结" in (b.label or "") for b in at.button)
+
+
 def test_app_new_flow_intervention_feedback_ui(monkeypatch, configured_app) -> None:
     """V0.3.1 — 干预后 👍/🤔 反馈按钮可选；反馈写入 learner_state 并落库。"""
     fake = FakeClient([])
@@ -779,7 +910,7 @@ def test_app_new_flow_intervention_feedback_ui(monkeypatch, configured_app) -> N
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
     assert not at.exception
     session = at.session_state["session"]
@@ -810,7 +941,7 @@ def test_app_new_flow_validation_pass_goes_complete(monkeypatch, configured_app)
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
     assert not at.exception
     session = at.session_state["session"]
@@ -838,7 +969,7 @@ def test_app_new_flow_validation_gap_enters_intervention(monkeypatch, configured
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是选择").run()
     assert not at.exception
     session = at.session_state["session"]
@@ -868,7 +999,7 @@ def test_app_new_flow_intervention_answer_stops_when_understand(monkeypatch, con
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是选择").run()  # 有缺口 → 干预
     assert not at.exception
     assert at.session_state["session"].stage == "intervention"
@@ -889,7 +1020,7 @@ def test_app_new_flow_complete_goes_to_summary(monkeypatch, configured_app) -> N
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过 → 完成
     assert not at.exception
     session = at.session_state["session"]
@@ -909,6 +1040,40 @@ def test_app_new_flow_complete_goes_to_summary(monkeypatch, configured_app) -> N
     concept = database.get_concept(session.concept_id)
     assert concept["user_definition"] == "机会成本就是放弃的次优选择"
     assert concept["mastery"] == "搞懂了"
+
+
+class PlainSummaryClient(FakeClient):
+    """FakeClient whose summary also includes the plain one-liner."""
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "每日总结" in user:
+            return json.dumps(
+                {
+                    "breakthrough": "我终于搞懂了机会成本",
+                    "plain": "说白了就是你选了A就没了B",
+                    "tomorrow_hook": "明天再想",
+                },
+                ensure_ascii=False,
+            )
+        return super().chat(messages, **kwargs)
+
+
+def test_app_summary_shows_three_part_summary(monkeypatch, configured_app) -> None:
+    """V0.3.1 修复 — 总结页展示 breakthrough / plain（可选）/ tomorrow_hook。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: PlainSummaryClient([]))
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    at = click_by_label(at, "查看今日总结")
+    assert not at.exception
+    text = markdown_text(at)
+    assert "你搞懂了什么" in text
+    assert "说白了我就是" in text
+    assert "说白了就是你选了A就没了B" in text
+    assert "明天 AI 会问你" in text
+    assert "明天再想" in text
 
 
 def test_app_summary_auto_timeout_shows_retry(monkeypatch, configured_app) -> None:
@@ -932,7 +1097,7 @@ def test_app_summary_auto_timeout_shows_retry(monkeypatch, configured_app) -> No
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FailingSummaryClient(fake))
     at = AppTest.from_file(APP, default_timeout=30).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
     at = click_by_label(at, "查看今日总结")
     assert not at.exception
@@ -949,7 +1114,7 @@ def test_app_validation_timeout_retry_recovers(monkeypatch, configured_app) -> N
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=30).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
     assert not at.exception
     session = at.session_state["session"]
@@ -977,17 +1142,17 @@ def test_app_start_validation_timeout_retryable(monkeypatch, configured_app) -> 
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=30).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     assert not at.exception
     session = at.session_state["session"]
     assert session.stage == "reading"  # 失败不前进，留在阅读阶段可重试
     assert any("❌" in m["text"] for m in at.session_state["messages"] if m["text"])
     assert any("重试" in m["text"] for m in at.session_state["messages"] if m["text"])
     # 按钮还在 → 用户可以再点一次重试
-    assert any("我读完了，开始验证" in (b.label or "") for b in at.button)
+    assert any("我读完了" in (b.label or "") for b in at.button)
 
     # 重试 → 第二次成功 → 进入验证阶段
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     assert not at.exception
     assert at.session_state["session"].stage == "validation"
     assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
@@ -1002,12 +1167,12 @@ def test_app_start_validation_malformed_reply_friendly_error(
     )
     at = AppTest.from_file(APP, default_timeout=30).run()
     at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
+    at = click_by_label(at, "我读完了")
     assert not at.exception
     session = at.session_state["session"]
     assert session.stage == "reading"  # 未崩溃、未前进，仍可重试
     assert any("格式不正确" in m["text"] for m in at.session_state["messages"] if m["text"])
-    assert any("我读完了，开始验证" in (b.label or "") for b in at.button)
+    assert any("我读完了" in (b.label or "") for b in at.button)
 
 
 # ----------------------------------------------------- V0.3.0 session resume

@@ -272,24 +272,30 @@ def summary_prompt(
     title: str,
     user_definition: str,
     qa_history: str,
+    reading_answers: str = "",
 ) -> str:
     """Ask the AI to generate the daily summary. Returns JSON."""
+    reading_block = (
+        f"\n阅读原文时用户自己的理解：\n{reading_answers}" if reading_answers else ""
+    )
     return f"""今天的学习结束了。请根据以下内容生成每日总结。
 
 学习的概念：{title}
 用户的最终理解：{user_definition}
 追问记录：
 {qa_history}
+{reading_block}
 
-生成两项内容：
+生成三项内容（总共不超过 3 句话）：
 1. breakthrough —— 一句"我终于搞懂了……"风格的话，用学习者自己的话总结今天最大的收获
    （如果用户没写，帮他提炼成第一人称），要有"啊哈"的感觉
-2. tomorrow_hook —— 一个"好奇心钩子"：预告明天会追问一个更刁钻、更有意思的问题，
+2. plain —— 一句大白话复述这个概念，用生活化的类比或例子，让没学过的人也能秒懂
+3. tomorrow_hook —— 一个"好奇心钩子"：预告明天会追问一个更刁钻、更有意思的问题，
    最好能和今天学的、或之前学过的概念产生关联，让人带着期待离开，例如
    "如果机会成本不存在，你的每一次选择会变成什么样？"
 
 只输出 JSON，格式：
-{{"breakthrough": "一句话", "tomorrow_hook": "一个勾人下次再来的问题"}}"""
+{{"breakthrough": "一句话", "plain": "一句大白话（可为空）", "tomorrow_hook": "一个勾人下次再来的问题"}}"""
 
 
 # ------------------------------------------------------------------ connections
@@ -613,6 +619,14 @@ def _legacy_deeper_question_prompt(
 # 核心：持续观察 Learner State，用最小干预推动理解跃迁，不再靠固定轮次提问。
 # 新 prompt 用 {name} 占位符（见 _fill）；JSON 示例中的花括号无需转义。
 
+# V0.3.1 hotfix — 深化追问按回答丰富度分级：回答越简短，追问越生活化；
+# 回答越深入，追问越往前推（类比 → 联系 → 反事实）。
+DEEPENING_LEVEL_GUIDES: dict[str, str] = {
+    "simple": "生活类比：用一件日常熟悉的东西打比方，问「这就像什么？」让概念落地到身边。",
+    "moderate": "联系：把概念与他已学过的相关概念或生活场景连起来，问「这和什么有关？」",
+    "rich": "反事实：让他想象「如果没有这个概念，会发生什么？」，从反面看清概念的价值。",
+}
+
 def _fill(template: str, **kwargs: str) -> str:
     """Replace ``{name}`` placeholders. JSON braces in the template are safe."""
     for key, value in kwargs.items():
@@ -625,9 +639,15 @@ def validation_task_prompt(
     source_text: str,
     concept: str,
     text_type: str = "",
+    reading_answers: str = "",
 ) -> str:
     """Generate one low-cost task that verifies real understanding (not rote
     recall). Returns JSON validated by :class:`ValidationTask`."""
+    reading_block = (
+        f"\n用户阅读时自己的理解（可参考，验证任务要针对他还没抓住的地方）：\n{reading_answers}"
+        if reading_answers
+        else ""
+    )
     return _fill(
         """你是 RecallOS 的学习任务设计器。
 
@@ -652,13 +672,14 @@ def validation_task_prompt(
 输入：
 concept: {concept}
 source_text: {source_text}
-text_type: {text_type}
+text_type: {text_type}{reading_block}
 
 输出 JSON 格式：
 {"task": "不用原文中的句子，用自己的话解释这个概念为什么重要。", "type": "summary", "difficulty": 2}""",
         source_text=source_text,
         concept=concept,
         text_type=text_type or "concept",
+        reading_block=reading_block,
     )
 
 
@@ -727,6 +748,73 @@ user_answer: {user_answer}
     )
 
 
+def validation_feedback_prompt(
+    *,
+    concept_title: str,
+    user_answer: str,
+    task_description: str,
+    reading_answers: list[dict] | None = None,
+) -> str:
+    """生成验证反馈 —— 具体、可行动、有对比（纯文本，非 JSON）。
+
+    用户在验证阶段答完题（且存在理解缺口）后立即展示，用来解释
+    「为什么没到位」，而不是只说一句「理解不到位」。
+    """
+    reading_context = ""
+    if reading_answers:
+        answers_text = "、".join(
+            f"第{i + 1}段：{a['answer']}" for i, a in enumerate(reading_answers)
+        )
+        reading_context = f"用户在阅读时的理解：{answers_text}\n"
+    return _fill(
+        """你是一位苏格拉底式导师。用户正在学习「{concept_title}」。
+
+验证任务：
+{task_description}
+
+{reading_context}用户的回答：
+{user_answer}
+
+请评估用户的回答，并给出**具体、可行动、有对比**的反馈。
+
+评估维度：
+1. **核心概念**：用户是否抓住了「{concept_title}」的本质？（对/部分/不对）
+2. **表达方式**：用户是否用自己的话说出了理解？（是/部分/否）
+3. **视角丰富度**：用户是否从多个角度理解？（是/部分/否）
+
+反馈格式（严格按以下结构）：
+---
+**你的回答提到了：**
+[列举用户回答里的有效要点，用 • 列出]
+
+**但机会成本的核心在于：**
+[用一句话说出概念本质]
+
+**对比：**
+你说的是「[用户的表述]」
+而机会成本更准确的说法是「[正确表述]」
+
+**试着想想这个例子：**
+[给出一个具体、与用户回答相关的场景例子]
+
+**所以：**
+[总结用户的理解程度：基本到位 / 方向对但需要调整 / 需要重新理解]
+
+---
+**重要规则：**
+- 永远不要只说「对了」或「错了」
+- 永远不要只说「理解不到位」而不解释
+- 必须给出具体对比（用户说的 vs. 正确的）
+- 必须给出具体例子
+- 语气要像朋友，不要像考官
+- 如果用户的答案有多种正确表述方式，接受它们。""",
+        concept_title=concept_title,
+        user_answer=user_answer,
+        task_description=task_description,
+        reading_context=reading_context,
+    )
+
+
 def intervention_decider_prompt(
     *,
     source_text: str,
@@ -737,6 +825,7 @@ def intervention_decider_prompt(
     context: str = "",
     intervention_history: str = "",
     minimum_action: str = "",
+    answer_richness: str = "",
 ) -> str:
     """Decide whether / how to intervene next (minimal intervention). Returns
     JSON validated by :class:`Intervention`.
@@ -744,11 +833,20 @@ def intervention_decider_prompt(
     ``minimum_action`` (V0.3.0 patch 3) is the lowest allowed intensity: when
     the previous intervention failed to move the learner, the AI must pick
     something at least one ladder step above it.
+
+    ``answer_richness`` (V0.3.1 hotfix) is the richness level of the learner's
+    latest answer (simple/moderate/rich). The decider must then push with a
+    question of that depth instead of a generic one.
     """
     context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
     history_block = (
         f"\n\n用户对已给干预的反馈（用于选择下一种干预方式）：\n{intervention_history}"
         if intervention_history
+        else ""
+    )
+    richness_block = (
+        f"\n\n用户上一次回答的丰富度：{answer_richness}（{DEEPENING_LEVEL_GUIDES.get(answer_richness, '')}）"
+        if answer_richness in DEEPENING_LEVEL_GUIDES
         else ""
     )
     mode_hint = (
@@ -799,7 +897,7 @@ hint（一句话提示）→ example（具体例子）→ analogy（类比）→
 concept: {concept}
 source_text: {source_text}
 当前目标：{current_target}
-learner_state: {learner_state}{history_block}{context_block}
+learner_state: {learner_state}{history_block}{context_block}{richness_block}
 
 输出 JSON 格式：
 {"action": "counterexample", "reason": "用户理解了基本关系，但无法识别概念边界", "content": "如果你放弃了三个选择，机会成本是不是三个选择加起来？为什么？", "requires_user_response": true}""",
@@ -811,6 +909,7 @@ learner_state: {learner_state}{history_block}{context_block}
         rules=rules_block,
         history_block=history_block,
         context_block=context_block,
+        richness_block=richness_block,
     )
 
 
@@ -905,6 +1004,51 @@ understanding_level: {understanding_level}
     )
 
 
+def deepening_question_prompt(
+    *,
+    level: str,
+    concept: str,
+    source_text: str,
+    qa_history: str = "",
+    understanding_level: str = "",
+) -> str:
+    """按回答丰富度分级生成一道深化追问（simple/moderate/rich）。纯文本，非 JSON。
+
+    - ``simple``：生活类比「这就像什么？」
+    - ``moderate``：联系类「这和什么有关？」
+    - ``rich``：反事实「如果没有它会怎样？」
+    """
+    if level not in DEEPENING_LEVEL_GUIDES:
+        raise ValueError(
+            f"level must be one of {sorted(DEEPENING_LEVEL_GUIDES)}, got {level!r}"
+        )
+    history_block = f"\n学习者此前的回答记录：\n{qa_history}" if qa_history else ""
+    level_block = (
+        f"\n当前理解层级：{understanding_level}" if understanding_level else ""
+    )
+    return _fill(
+        """你是 RecallOS 的学习教练。
+
+用户刚对「{concept}」做过一次输出。请根据其回答的丰富度，生成一道刚好能把他往前推一步的深化追问。
+
+{guide}
+
+要求：
+1. 只输出这一道深化问题本身，具体、有画面感、略有挑战但不刁难。
+2. 严格按上面的层级方式追问，不要跳级。
+3. 不要输出任何解释、标题或 JSON。
+
+输入：
+concept: {concept}
+source_text: {source_text}{level_block}{history_block}""",
+        concept=concept,
+        source_text=source_text,
+        guide=DEEPENING_LEVEL_GUIDES[level],
+        level_block=level_block,
+        history_block=history_block,
+    )
+
+
 # ------------------------------------------------------------------- messages
 
 def build_messages(user_content: str) -> list[dict[str, str]]:
@@ -962,6 +1106,7 @@ class SummaryResult(RecallBaseModel):
     """Validated output of :func:`summary_prompt`."""
 
     breakthrough: NonEmptyStr
+    plain: OptionalStr = None
     tomorrow_hook: NonEmptyStr
 
 
@@ -1089,9 +1234,12 @@ __all__ = [
     "detect_text_type_prompt",
     "validation_task_prompt",
     "learner_state_analyzer_prompt",
+    "validation_feedback_prompt",
     "intervention_decider_prompt",
     "learner_state_updater_prompt",
     "deepening_offer_prompt",
+    "deepening_question_prompt",
+    "DEEPENING_LEVEL_GUIDES",
     "simplify_explanation_prompt",
     "DEEPER_QUESTION_ORDER",
     "LegacyValidationTask",

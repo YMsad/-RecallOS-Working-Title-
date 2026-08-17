@@ -24,6 +24,8 @@ from core import (
     connections_prompt,
     deepening_offer_prompt,
     detect_text_type_prompt,
+    deepening_question_prompt,
+    DEEPENING_LEVEL_GUIDES,
     intervention_decider_prompt,
     learner_state_analyzer_prompt,
     learner_state_updater_prompt,
@@ -33,6 +35,7 @@ from core import (
     summary_prompt,
     validate_response,
     validate_response_list,
+    validation_feedback_prompt,
     validation_task_prompt,
     warmup_prompt,
 )
@@ -332,6 +335,39 @@ def test_analyzer_prompt_includes_user_signals() -> None:
     assert "目标：理解概念本身" in plain
 
 
+def test_validation_feedback_prompt_is_concrete_and_contrastive() -> None:
+    """V0.3.1 hotfix — 反馈必须是具体、有对比、可行动的，禁止只说「理解不到位」。"""
+    prompt = validation_feedback_prompt(
+        concept_title="机会成本",
+        user_answer="它可以帮助决策",
+        task_description="用自己的话解释机会成本",
+        reading_answers=[
+            {"paragraph_index": 0, "answer": "机会成本是放弃的选项"}
+        ],
+    )
+    assert "苏格拉底式导师" in prompt
+    assert "机会成本" in prompt
+    assert "它可以帮助决策" in prompt
+    assert "机会成本是放弃的选项" in prompt  # 阅读答案进上下文
+    # 结构强制项：对比 / 例子 / 为什么
+    assert "你的回答提到了" in prompt
+    assert "但机会成本的核心在于" in prompt
+    assert "对比" in prompt
+    assert "试着想想这个例子" in prompt
+    assert "总结用户的理解程度" in prompt
+    assert "不要只说「理解不到位」" in prompt
+
+
+def test_validation_feedback_prompt_optional_reading_answers() -> None:
+    prompt = validation_feedback_prompt(
+        concept_title="复利",
+        user_answer="利滚利",
+        task_description="解释复利",
+    )
+    assert "用户的回答" in prompt and "利滚利" in prompt
+    assert "阅读时的理解" not in prompt  # 没有阅读答案时省略
+
+
 def test_intervention_decider_prompt_includes_feedback_history() -> None:
     """V0.3.1 — 决策器收到过往干预反馈。"""
     prompt = intervention_decider_prompt(
@@ -368,6 +404,51 @@ def test_intervention_decider_forces_intensity_ladder() -> None:
     assert "上次干预未让用户进步" in escalated
     assert "example（具体例子）" in escalated
     assert "从这一级起步" in escalated
+
+
+def test_intervention_decider_grades_question_by_answer_richness() -> None:
+    """V0.3.1 hotfix — 决策器收到用户回答的丰富度，追问必须匹配对应层级。"""
+    prompt = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        answer_richness="rich",
+    )
+    assert "丰富度" in prompt
+    assert "rich" in prompt
+    assert "反事实" in prompt  # rich → 反事实「如果没有它会怎样？」
+    assert "如果没有这个概念" in prompt
+
+    simple = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}", answer_richness="simple"
+    )
+    assert "生活类比" in simple
+    assert "这就像什么" in simple
+
+    plain = intervention_decider_prompt(
+        source_text="S", concept="X", learner_state="{}"
+    )
+    assert "丰富度" not in plain  # 未提供时不干扰默认决策
+
+
+def test_deepening_question_prompt_grades_by_level() -> None:
+    """V0.3.1 hotfix — deepening_question_prompt 按丰富度给出对应层次的追问模板。"""
+    simple = deepening_question_prompt(level="simple", concept="机会成本", source_text="原文")
+    assert "这就像什么" in simple
+    assert "生活类比" in simple
+
+    moderate = deepening_question_prompt(level="moderate", concept="机会成本", source_text="原文")
+    assert "和什么有关" in moderate
+    assert DEEPENING_LEVEL_GUIDES["moderate"] in moderate
+
+    rich = deepening_question_prompt(
+        level="rich", concept="机会成本", source_text="原文", qa_history="Q1→A1"
+    )
+    assert "如果没有这个概念" in rich
+    assert "Q1→A1" in rich  # 历史回答进上下文
+
+    with pytest.raises(ValueError):
+        deepening_question_prompt(level="unknown", concept="X", source_text="Y")
 
 
 def test_learner_state_analysis_validates() -> None:

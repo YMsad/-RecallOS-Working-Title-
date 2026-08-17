@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -187,10 +188,11 @@ def _start_new_session(title: str, source: str) -> None:
         )
     messages.append(
         {"role": "assistant",
-         "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了，开始验证」。"}
+         "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了」。"}
     )
     st.session_state.messages = messages
-    # 清理上一轮遗留的 AI 错误/重试状态
+    # 清理上一轮遗留的 AI 错误/重试状态 + 阅读导航归零
+    st.session_state["v_read_index"] = 0
     st.session_state.pop("pending_action", None)
     st.session_state.pop("v_pending_answer", None)
     st.session_state.pop("v_ai_error", None)
@@ -559,6 +561,37 @@ def _reading_paragraphs(source_text: str) -> list[str]:
     return [p.strip() for p in source_text.split("\n\n") if p.strip()]
 
 
+def _split_sentences(text: str) -> list[str]:
+    """按中文/英文句末标点把一段文字切成句子。"""
+    parts = re.split(r"(?<=[。！？!?；;])", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _bold_keywords(text: str) -> str:
+    """阅读视觉辅助：把「」内的关键短语加粗；已带 ** 的直接保留。"""
+    if not text:
+        return text
+    if "**" in text:
+        return text
+    return re.sub(r"「([^「」]{2,12})」", r"**「\1」**", text)
+
+
+def _extract_key_sentences(text: str, n: int) -> list[str]:
+    """提取一段文字里最关键的 n 句（优先含「」/**强调**的，其次靠前的），保持原顺序。"""
+    sentences = _split_sentences(text)
+    if len(sentences) <= n:
+        return sentences
+    scored = []
+    for idx, sent in enumerate(sentences):
+        score = 0
+        if "「" in sent or "**" in sent:
+            score += 2
+        score += max(0, n - idx)  # 越靠前越重要
+        scored.append((score, idx, sent))
+    kept = sorted(scored, key=lambda t: (t[0], -t[1]), reverse=True)[:n]
+    return [s for _, _, s in sorted(kept, key=lambda t: t[1])]
+
+
 def _render_learning_new(session: LearningSession) -> None:
     # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深入选择 → 最小干预 → 完成
     # 先执行按钮触发的 AI 待办，再捕获 chat_input 回答（同一 run 内处理，
@@ -573,21 +606,55 @@ def _render_learning_new(session: LearningSession) -> None:
         paragraphs = _reading_paragraphs(session.source_text)
         if not paragraphs:
             st.info("没有粘贴原文，直接开始验证也可以。")
-            if st.button("直接开始验证", key="v_read_done"):
+            if st.button("直接开始验证", key="v_read_done", type="primary"):
                 st.session_state["pending_action"] = "start_validation"
                 st.rerun()
-            render_messages()
             return
-        # V0.3.1 — 阅读拆段 + 逐段引导：每段一个小任务，让阅读有方向、不空转
-        for i, para in enumerate(paragraphs):
-            st.markdown(f"**第 {i + 1} 段 / 共 {len(paragraphs)} 段**")
-            st.markdown(para)
-            st.caption("🗝️ 读这一段时，试着抓住它的核心一句——它到底在讲什么？")
-            st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
-        if st.button("我读完了，开始验证", key="v_read_done"):
+        # V0.3.1 修复 — 阅读拆段 + 每段引导问题：让阅读不是「纯读」，而是
+        # 每段用自己的话总结一句（记录到 reading_answers，作为验证与总结的上下文）。
+        # V0.3.1 hotfix — 一次一段：v_read_index 记录当前段，进度条 + 上/下一段 + 我读完了。
+        # 打开「📋 只看重点」只显示关键句（关键词加粗），全文收进展开面板，减少顿读感。
+        show_keys = st.toggle("📋 只看重点", key="v_read_show_keys")
+        total = len(paragraphs)
+        idx = st.session_state.get("v_read_index", 0)
+        if idx >= total:
+            idx = total - 1
+            st.session_state["v_read_index"] = idx
+        st.progress((idx + 1) / total)
+        st.markdown(f"**第 {idx + 1} 段 / 共 {total} 段**")
+        para = paragraphs[idx]
+        if show_keys and len(_split_sentences(para)) > 3:
+            keys = _extract_key_sentences(para, 3)
+            for k in keys:
+                st.markdown(f"- {_bold_keywords(k)}")
+            with st.expander("📄 展开原文"):
+                st.markdown(_bold_keywords(para))
+        else:
+            st.markdown(_bold_keywords(para))
+        answer = st.text_input(
+            "🗝️ 这段在说什么？（用自己的话总结一句）",
+            key=f"v_read_ans_{idx}",
+            placeholder="比如：机会成本就是——你选了A，就放弃了B",
+        )
+        if answer and answer != session.reading_answer_text(idx):
+            session.record_reading_answer(idx, answer)
+        c_prev, c_next, _ = st.columns([1, 1, 2])
+        with c_prev:
+            if st.button("◀ 上一段", key="v_read_prev", disabled=idx == 0):
+                st.session_state["v_read_index"] = idx - 1
+                st.rerun()
+        with c_next:
+            if st.button("下一段 ▶", key="v_read_next", disabled=idx >= total - 1):
+                st.session_state["v_read_index"] = idx + 1
+                st.rerun()
+        answered = session.reading_answer_count()
+        if answered > 0:
+            st.caption(f"✅ 已记录 {answered}/{total} 段的理解")
+        else:
+            st.caption("💡 试着每段都用一句话说出它讲了什么——这会让后面的验证更轻松")
+        if st.button("我读完了", key="v_read_done", type="primary"):
             st.session_state["pending_action"] = "start_validation"
             st.rerun()
-        render_messages()
         return
 
     if stage == "validation":
@@ -669,7 +736,7 @@ def _render_learning_new(session: LearningSession) -> None:
 
     if stage == "complete":
         st.success("🎉 理解验证通过，今天学完啦！")
-        render_messages()
+        st.caption("学完只是一个开始——明天到点我会提醒你回来复习巩固。")
         if st.button("查看今日总结", type="primary", use_container_width=True, key="v_finish"):
             st.session_state.pop("v_deeper_question", None)
             _navigate("summary")
@@ -866,20 +933,47 @@ def render_summary() -> None:
         return
 
     summary = st.session_state.summary_result
-    st.markdown(f"**我终于搞懂了：**\n\n{summary.breakthrough}")
+
+    # V0.3.1 修复 — 3 句话总结
+    st.markdown("### ✨ 你搞懂了什么")
+    st.markdown(f"> {summary.breakthrough}")
+    st.divider()
+    if getattr(summary, "plain", None):
+        st.markdown("### 💡 说白了我就是")
+        st.markdown(f"> {summary.plain}")
+        st.divider()
+    st.markdown("### 📌 明天 AI 会问你")
+    st.markdown(f"> {summary.tomorrow_hook}")
+    st.divider()
 
     all_concepts = get_all_concepts()
     mastered = sum(1 for c in all_concepts if c["mastery"] == MASTERY_UNDERSTOOD)
     conn_count = len(get_all_connections())
-    st.markdown("### 📊 今日收获")
-    st.markdown(f"- 搞懂了 **1** 个概念")
-    st.markdown(f"- 建立了 **{conn_count}** 条连接")
-    st.markdown(f"- 累计掌握 **{mastered}** 个概念")
+    st.caption(f"📊 累计掌握 {mastered} 个概念，建立 {conn_count} 条连接")
 
-    st.markdown(f"### 📌 明天AI会追问你\n\n{summary.tomorrow_hook}")
-
-    if st.button("明天继续", type="primary", use_container_width=True):
+    if st.button("👋 明天继续", type="primary", use_container_width=True):
         go_home()
+
+    # 可选项（放在开放式折叠里，不阻碍用户离开）
+    with st.expander("🔍 还想再挖深一点？（可选）"):
+        st.caption("如果今天还有没想透的地方，可以继续追问。")
+        if st.button("继续深入追问", key="summary_deeper"):
+            session.stage = "intervention"
+            st.session_state.step = "learning"
+            st.rerun()
+
+    with st.expander("🔗 查看相关概念（可选）"):
+        conns = get_connections(session.concept_id) if session.concept_id else []
+        if conns:
+            for conn in conns:
+                other_title = (
+                    conn["concept_a_title"]
+                    if conn["concept_a_title"] != session.title
+                    else conn["concept_b_title"]
+                )
+                st.markdown(f"- 与 **{other_title}** 的关系：{conn['relation_text']}")
+        else:
+            st.caption("（暂无连接，可以去历史页添加）")
 
 
 # ------------------------------------------------------------------ history
