@@ -986,16 +986,48 @@ def test_reading_signals_persist_and_restore() -> None:
         {"kind": "confused", "position": 0},
         {"kind": "clear", "position": 2},
     ]
-    assert session.stuck_points == ["机会成本到底只算最优那一个还是都算"]
-    assert session.learner_state.uncertain == ["机会成本到底只算最优那一个还是都算"]
+    # V0.3.0 patch 1 — 标「没看懂」自动进 stuck_points / learner_state.uncertain
+    derived = "阅读原文第 1 段时用户标了「没看懂」"
+    assert session.stuck_points == [derived, "机会成本到底只算最优那一个还是都算"]
+    assert session.learner_state.uncertain == [
+        derived,
+        "机会成本到底只算最优那一个还是都算",
+    ]
+    assert session.learner_state.has_gap() is True
 
     restored = restore_session(cid)
     assert restored.reading_signals == [
         {"kind": "confused", "position": 0},
         {"kind": "clear", "position": 2},
     ]
-    assert restored.stuck_points == ["机会成本到底只算最优那一个还是都算"]
+    assert restored.stuck_points == [derived, "机会成本到底只算最优那一个还是都算"]
     assert "机会成本到底只算最优那一个还是都算" in restored.learner_state.uncertain
+    assert derived in restored.learner_state.uncertain
+
+
+def test_confused_signal_alone_closes_gap() -> None:
+    """V0.3.0 patch 1 — 只点「🤔 没看懂」不填文字，也算一个理解缺口。"""
+    session = LearningSession("机会成本", "段一\n\n段二")
+    cid = session.begin()
+    session.record_reading_signal("confused", 1)
+    assert session.learner_state.has_gap() is True
+    assert "阅读原文第 2 段时用户标了「没看懂」" in session.learner_state.uncertain
+    row = database.get_concept(cid)["signals"]
+    import json as _json
+
+    payload = _json.loads(row)
+    assert any(s["kind"] == "confused" for s in payload["reading_signals"])
+
+
+def test_clear_and_match_signals_do_not_create_gaps() -> None:
+    """V0.3.0 patch 1 — 只有「没看懂」才进 Learner State，💡/✓ 不制造缺口。"""
+    session = LearningSession("机会成本", "段一")
+    session.begin()
+    session.record_reading_signal("match", 0)
+    session.record_reading_signal("clear", 0)
+    assert session.stuck_points == []
+    assert session.learner_state.uncertain == []
+    assert session.learner_state.has_gap() is False
 
 
 def test_reading_signals_ignore_blank_stuck_point() -> None:
@@ -1091,3 +1123,118 @@ def test_decider_prompt_uses_past_intervention_feedback() -> None:
     assert deciders, "期待决策器收到干预反馈历史"
     assert "counterexample" in deciders[-1]
     assert "unclear" in deciders[-1]
+
+
+# ------------------------------------------------- V0.3.0 patch 2/3 干预闭环
+
+
+def test_ineffective_intervention_records_and_escalates_floor() -> None:
+    """干预无效：记录 effective=False、连续计数 +1，且下一步被强升到下一优先级。
+
+    AI 违抗（仍返回 hint）也会被硬性抬到 example（>= 最低允许级别）。
+    """
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("hint", "提示：成本指的是什么"),
+        update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
+        intervention_reply("hint", "提示：再想想边界"),  # 低于最低级别，应被抬升
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    assert session.current_intervention()["action"] == "hint"
+
+    result = session.submit_intervention_answer("我的回答")
+    assert result["stage"] == "intervention"
+    assert session.stage == "intervention"
+    # 记录无效 + 计数
+    assert session._consecutive_ineffective == 1
+    assert session.learner_state.intervention_history[-2]["effective"] is False
+    assert session.learner_state.intervention_history[-2]["action"] == "hint"
+    # 下一次决策被强制升级（AI 返回 hint → 抬到 example）
+    assert session.current_intervention()["action"] == "example"
+
+    # 决策器 prompt 带上了「最低允许级别」约束
+    decider_prompts = [
+        p["messages"][1]["content"]
+        for p in transport.requests
+        if "最小干预决策器" in p["messages"][1]["content"]
+    ]
+    assert "上次干预未让用户进步" in decider_prompts[-1]
+    assert "example（具体例子）" in decider_prompts[-1]
+    # 该约束不落库丢失：intervention_history 快照里带 effective 标记
+    restored = restore_session(cid, client=session.client)
+    assert restored.learner_state.intervention_history[-1]["effective"] is False
+    assert restored.learner_state.intervention_history[-1]["action"] == "hint"
+
+
+def test_two_ineffective_interventions_finish() -> None:
+    """连续 2 次干预无效 → 直接 complete，不再继续。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("hint", "提示1"),
+        update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
+        intervention_reply("question", "提问：边界到底怎么算？"),  # floor=example，question 以更强级别继续
+        update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    session.submit_intervention_answer("答1")
+    assert session.stage == "intervention"
+    assert session._consecutive_ineffective == 1
+
+    result = session.submit_intervention_answer("答2")
+    assert result["stage"] == "complete"
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert "final_note" in result
+    assert session._consecutive_ineffective == 2
+    # 进入复习队列
+    row = database.get_concept(cid)
+    assert row["next_review_date"] == (date.today() + timedelta(days=1)).isoformat()
+
+
+def test_effective_intervention_resets_counter() -> None:
+    """层级有提升 → 记录 effective=True 并清零连续无效计数。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("hint", "提示"),
+        update_reply("application", understood=["会用"], next_best_action="none"),
+    )
+    session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+
+    result = session.submit_intervention_answer("我举了一个生活例子")
+    assert result["stage"] == "complete"
+    assert session._consecutive_ineffective == 0
+    assert (
+        session.learner_state.intervention_history[-1]["effective"] is True
+    )
+    assert (
+        session.learner_state.understanding_level == "application"
+    )
+
+
+def test_escalation_caps_at_top_of_ladder() -> None:
+    """阶梯顶部（question）无效时无更高级别可升级 → 尊重 AI 的收尾决策。"""
+    session, _ = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", uncertain=["边界不清"]),
+        intervention_reply("question", "提问1"),
+        update_reply("relationship", uncertain=["边界不清"], next_best_action="question"),
+        intervention_reply("none", "到这里吧，明天复习再推进。", requires_user_response=False),
+    )
+    session.begin()
+    session.start_validation()
+    session.submit_validation("回答")
+    assert session.current_intervention()["action"] == "question"
+
+    result = session.submit_intervention_answer("答1")
+    # question 之上没有更高级别 → minimum_action 为空 → AI 的 none 收尾生效
+    assert result["stage"] == "complete"
+    assert "到这里吧" in result["final_note"]

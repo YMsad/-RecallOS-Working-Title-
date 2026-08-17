@@ -755,7 +755,10 @@ def test_app_new_flow_reading_signal_buttons_and_stuck(
     at = click_by_label(at, "保存")
     assert not at.exception
     session = at.session_state["session"]
-    assert session.stuck_points == ["边界不知道算不算"]
+    # V0.3.0 patch 1 — 点「🤔」也自动生成一条卡住点，与手填的内容并存
+    assert "阅读原文第 1 段时用户标了「没看懂」" in session.stuck_points
+    assert "边界不知道算不算" in session.stuck_points
+    assert "边界不知道算不算" in session.learner_state.uncertain
 
     # 再点「✓ 我懂了」也记录（混合信号不互相覆盖）
     at = at.button(key="v_rs_k_0").click().run()

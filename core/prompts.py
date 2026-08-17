@@ -736,9 +736,15 @@ def intervention_decider_prompt(
     mode: str = "validation",
     context: str = "",
     intervention_history: str = "",
+    minimum_action: str = "",
 ) -> str:
     """Decide whether / how to intervene next (minimal intervention). Returns
-    JSON validated by :class:`Intervention`."""
+    JSON validated by :class:`Intervention`.
+
+    ``minimum_action`` (V0.3.0 patch 3) is the lowest allowed intensity: when
+    the previous intervention failed to move the learner, the AI must pick
+    something at least one ladder step above it.
+    """
     context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
     history_block = (
         f"\n\n用户对已给干预的反馈（用于选择下一种干预方式）：\n{intervention_history}"
@@ -750,6 +756,30 @@ def intervention_decider_prompt(
         if mode == "validation"
         else "当前处于深入阶段：目标是找到当前理解层级之上、最值得推进的那一个缺口。"
     )
+    if minimum_action in INTERVENTION_LABELS:
+        extra = [
+            (
+                f"3. 上次干预未让用户进步：本次 action 的强度不得低于「{minimum_action}"
+                f"（{INTERVENTION_LABELS[minimum_action]}）」，从这一级起步。"
+            )
+        ]
+        base = 4
+    else:
+        extra = []
+        base = 3
+    rules = [
+        "1. 能用更低优先级解决，就绝不用更高优先级（能用一句话提示解决，就不要给例子；能用一个例子解决，就不要解释完整答案）。",
+        "2. 只有当更低优先级的干预无效时，才能使用更高优先级的干预。",
+    ]
+    rules += extra
+    rules += [
+        f"{base}. content 只给\"刚好让用户能继续思考\"的内容，绝不直接给出完整答案。",
+        f"{base + 1}. 用户仍有缺口但干预已没有价值时，action=none 并结束。",
+        f"{base + 2}. requires_user_response：需要用户重新回答时为 true；直接给出收尾解释时为 false。",
+        f"{base + 3}. 参考过往干预反馈：用户对某类干预（类比/例子/提示/反例）说\"清楚多了\"时，优先再用同类的更简单版本；对某类说\"还是有点懵\"时，换一种方式。",
+        f"{base + 4}. 只输出合法 JSON。",
+    ]
+    rules_block = "\n".join(rules)
     return _fill(
         """你是 RecallOS 的最小干预决策器。
 
@@ -757,16 +787,11 @@ def intervention_decider_prompt(
 
 不要机械地"答对→下一题，答错→再问"。只有在存在真实且有价值的理解缺口时才干预。
 
-最小干预优先级（越靠前越好）：
-none → hint → example / analogy → counterexample → question → 解释
+干预强度优先级（从低到高，低=更轻）：
+hint（一句话提示）→ example（具体例子）→ analogy（类比）→ counterexample（反例）→ question（直接提问）
 
-规则：
-1. 能用一句提示解决，就不要给例子；能用一个例子解决，就不要解释完整答案。
-2. content 只给"刚好让用户能继续思考"的内容，绝不直接给出完整答案。
-3. 用户仍有缺口但干预已没有价值时，action=none 并结束。
-4. requires_user_response：需要用户重新回答时为 true；直接给出收尾解释时为 false。
-5. 参考过往干预反馈：用户对某类干预（类比/例子/提示/反例）说"清楚多了"时，优先再用同类的更简单版本；对某类说"还是有点懵"时，换一种方式。
-6. 只输出合法 JSON。
+强制规则：
+{rules}
 
 {mode_hint}
 
@@ -783,6 +808,7 @@ learner_state: {learner_state}{history_block}{context_block}
         learner_state=learner_state,
         current_target=current_target or "验证任务",
         mode_hint=mode_hint,
+        rules=rules_block,
         history_block=history_block,
         context_block=context_block,
     )
@@ -985,6 +1011,23 @@ InterventionAction = Literal[
     "none", "hint", "analogy", "example", "counterexample", "question", "rephrase"
 ]
 
+# V0.3.0 patch 3 — intervention intensity ladder, low -> high (强制优先级).
+# Only escalate to a heavier intervention once the lighter one has failed.
+INTERVENTION_LADDER: tuple[str, ...] = (
+    "hint",
+    "example",
+    "analogy",
+    "counterexample",
+    "question",
+)
+INTERVENTION_LABELS: dict[str, str] = {
+    "hint": "一句话提示",
+    "example": "具体例子",
+    "analogy": "类比",
+    "counterexample": "反例",
+    "question": "直接提问",
+}
+
 
 class LearnerStateAnalysis(RecallBaseModel):
     """Validated output of :func:`learner_state_analyzer_prompt`."""
@@ -1059,4 +1102,6 @@ __all__ = [
     "UnderstandingLevel",
     "ResponseQuality",
     "InterventionAction",
+    "INTERVENTION_LADDER",
+    "INTERVENTION_LABELS",
 ]

@@ -350,6 +350,26 @@ def test_intervention_decider_prompt_includes_feedback_history() -> None:
     assert "用户对已给干预的反馈" not in plain
 
 
+def test_intervention_decider_forces_intensity_ladder() -> None:
+    """V0.3.0 patch 3 — 决策器 prompt 内置从低到高的强制干预阶梯。"""
+    prompt = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}"
+    )
+    assert "hint（一句话提示）→ example（具体例子）→ analogy（类比）→ counterexample（反例）→ question（直接提问）" in prompt
+    assert "只有当更低优先级的干预无效时，才能使用更高优先级的干预" in prompt
+    assert "上次干预未让用户进步" not in prompt  # 无最低级别时不加约束
+
+    escalated = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        minimum_action="example",
+    )
+    assert "上次干预未让用户进步" in escalated
+    assert "example（具体例子）" in escalated
+    assert "从这一级起步" in escalated
+
+
 def test_learner_state_analysis_validates() -> None:
     result = validate_response(
         '{"understanding_level": "relationship", "understood": ["理解了关系"], '

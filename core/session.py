@@ -27,11 +27,12 @@ from core.database import (
     save_qa,
     update_concept,
 )
-from core.learner_state import LearnerState
+from core.learner_state import LearnerState, level_rank
 from core.models import MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 from core.review import add_to_review_queue
 from core.prompts import (
     DEEPER_QUESTION_ORDER,
+    INTERVENTION_LADDER,
     CheckAnswerResult,
     ConnectionSuggestion,
     DeepeningOffer,
@@ -94,6 +95,26 @@ def _intervention_message(intervention: Any) -> str:
     """Bubble text shown to the learner for a decided intervention."""
     icon = _INTERVENTION_ICONS.get(intervention.get("action", ""), "💡")
     return f"{icon} {intervention['content']}"
+
+
+# V0.3.0 patch 2/3 — 干预闭环：强度阶梯 + 无效上限
+INEFFECTIVE_LIMIT = 2
+
+
+def _intervention_rank(action: str) -> int:
+    """Ladder index for an action; -1 for actions outside the ladder."""
+    try:
+        return INTERVENTION_LADDER.index(action)
+    except ValueError:
+        return -1
+
+
+def _next_intervention_level(action: str) -> str | None:
+    """The next-heavier intervention type, or None at the top of the ladder."""
+    rank = _intervention_rank(action)
+    if rank < 0 or rank + 1 >= len(INTERVENTION_LADDER):
+        return None
+    return INTERVENTION_LADDER[rank + 1]
 
 
 def deprecated(message: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -205,6 +226,8 @@ class LearningSession:
         self.intervention_feedback_list: list[dict[str, Any]] = []
         self._ask_confidence_this_round: bool = False
         self._intervention_feedback_given: bool = False
+        # V0.3.0 patch 2 — 连续无效干预计数（>= INEFFECTIVE_LIMIT 时直接完成）
+        self._consecutive_ineffective: int = 0
 
     # ------------------------------------------------------------------ flow
 
@@ -425,6 +448,7 @@ class LearningSession:
         self._offer = None
         self._ask_confidence_this_round = random.random() < CONFIDENCE_PROMPT_RATE
         self._intervention_feedback_given = False
+        self._consecutive_ineffective = 0
         self.stage = "validation"
         self._persist_new_flow()
         logger.info("Validation started for concept %s (id=%s)", self.title, cid)
@@ -437,8 +461,19 @@ class LearningSession:
 
         ``kind`` is one of ``confused`` / ``match`` / ``clear``. Position is the
         0-based index of the paragraph the user marked.
+
+        A ``confused`` marker also lands in ``stuck_points`` /
+        ``learner_state.uncertain`` so it drives the Learner State and is
+        picked up by ``has_gap()`` (V0.3.0 patch 1).
         """
-        self.reading_signals.append({"kind": kind, "position": int(position)})
+        position = int(position)
+        self.reading_signals.append({"kind": kind, "position": position})
+        if kind == "confused":
+            note = f"阅读原文第 {position + 1} 段时用户标了「没看懂」"
+            if note not in self.stuck_points:
+                self.stuck_points.append(note)
+            if note not in self.learner_state.uncertain:
+                self.learner_state.uncertain.append(note)
         self._persist_new_flow()
 
     def record_stuck_point(self, text: str) -> None:
@@ -743,6 +778,9 @@ class LearningSession:
         - No valuable gap left → finish.
         - Gap remains → the next minimal intervention (stage stays
           "intervention").
+        - The intervention did not move the learner (V0.3.0 patch 2): record
+          it as ineffective, escalate the next one, and after two consecutive
+          failures finish instead of wasting the learner's time.
         """
         cid = self._require_started()
         if self.stage != "intervention" or self._current_intervention is None:
@@ -750,7 +788,13 @@ class LearningSession:
                 "no active intervention; call submit_validation/choose_deepening first"
             )
         current = self._current_intervention
+        before_level = self.learner_state.understanding_level
         update = self._update_learner(answer)
+        # 干预闭环：层级未提升 → 本次干预无效
+        effective = level_rank(update.understanding_level) > level_rank(before_level)
+        if self.learner_state.intervention_history:
+            self.learner_state.intervention_history[-1]["effective"] = effective
+        self._consecutive_ineffective = 0 if effective else self._consecutive_ineffective + 1
         self.deeper_history.append(
             {
                 "question": current["content"],
@@ -762,17 +806,28 @@ class LearningSession:
                 "uncertain": update.uncertain,
                 "misconceptions": update.misconceptions,
                 "next_best_action": update.next_best_action,
+                "intervention_history": list(self.learner_state.intervention_history),
             }
         )
         self.current_deeper_index += 1
         self._current_intervention = None
         self._persist_new_flow()
         logger.info(
-            "Intervention answered for concept %s (id=%s, level=%s)",
+            "Intervention answered for concept %s (id=%s, level=%s, effective=%s)",
             self.title,
             cid,
             self.learner_state.understanding_level,
+            effective,
         )
+
+        # 连续 2 次干预无效 → 直接完成，不再继续
+        if self._consecutive_ineffective >= INEFFECTIVE_LIMIT:
+            return self._finish_new_flow(
+                final_intervention={
+                    "action": "none",
+                    "content": "连续两次提示都没能让这一步的理解明显进步。先把当前的理解记下来，明天复习时我们再从这块接着推进。",
+                }
+            )
 
         if self.learner_state.should_stop():
             return self._finish_new_flow()
@@ -883,6 +938,17 @@ class LearningSession:
     def _decide_intervention(
         self, *, mode: str
     ) -> dict[str, Any] | None:
+        # V0.3.0 patch 3 — 上次干预无效时，本次必须升级到阶梯的下一级
+        last = (
+            self.learner_state.intervention_history[-1]
+            if self.learner_state.intervention_history
+            else None
+        )
+        minimum_action = (
+            _next_intervention_level(last.get("action", "")) or ""
+            if last and last.get("effective") is False
+            else ""
+        )
         reply = self._chat_or_raise(
             intervention_decider_prompt(
                 source_text=self.source_text,
@@ -901,11 +967,20 @@ class LearningSession:
                     ],
                     ensure_ascii=False,
                 ),
+                minimum_action=minimum_action,
             ),
             QUESTION_TEMPERATURE,
             "决定最小干预",
         )
         inter = self._parse_or_raise(reply, Intervention, "干预决策")
+        # 强制优先级：AI 违抗时硬性抬到最低允许级别（none 也会被迫升级，
+        # 保证「无效→升级」闭环真正收敛，而不是提前放弃）
+        if minimum_action:
+            if inter.action == "none":
+                inter.action = minimum_action
+                inter.requires_user_response = True
+            elif _intervention_rank(inter.action) < _intervention_rank(minimum_action):
+                inter.action = minimum_action
         if inter.action == "none":
             # 没有值得继续的干预：若给了收尾内容，则作为最终提示后结束
             if inter.content:
