@@ -557,7 +557,8 @@ def test_start_validation_malformed_reply_raises_friendly_session_error() -> Non
     assert session.stage == "reading"  # 失败不前进
 
 
-def test_submit_validation_no_gap_moves_to_offer() -> None:
+def test_submit_validation_no_gap_completes() -> None:
+    """V0.3.1 — 验证过即完：无理解缺口直接完成，不再进入 offer。"""
     session, _ = make_session(
         validation_task_reply("任务"),
         analysis_reply("relationship", understood=["理解了核心含义"], quality="deep"),
@@ -565,13 +566,17 @@ def test_submit_validation_no_gap_moves_to_offer() -> None:
     cid = session.begin()
     session.start_validation()
     result = session.submit_validation("机会成本就是我必须放弃的那个次优选择")
-    assert result["stage"] == "offer"
-    assert result["understanding_level"] == "relationship"
+    assert result["stage"] == "complete"
+    assert "你的理解已经到位" in result["final_note"]
     assert session.validation_passed is True
     assert session.validation_attempts == 0
-    assert session.stage == "offer"
+    assert session.stage == "complete"
+    assert session.phase == "connections"
     assert len(session.validation_history) == 1
     assert session.learner_state.has_gap() is False
+    # 完成即加入复习队列
+    row = database.get_concept(cid)
+    assert row["next_review_date"] == (date.today() + timedelta(days=1)).isoformat()
 
 
 def test_submit_validation_gap_moves_to_intervention() -> None:
@@ -639,19 +644,19 @@ def test_ask_simplify_returns_plain_text_and_keeps_stage() -> None:
 
 
 def test_offer_deepening_generates_offer() -> None:
+    """V0.3.1 — offer API 仍保留（仅兼容遗留数据）：须先处于 offer 阶段。"""
     session, transport = make_session(
         validation_task_reply("任务"),
-        analysis_reply("relationship", understood=["核心"], quality="deep"),
         offer_reply("你已经抓住核心，要不要再挖一层？"),
     )
     session.begin()
     session.start_validation()
-    session.submit_validation("回答")
+    session.stage = "offer"  # 主流程不再进入 offer；此处显式置入以测遗留 API
     result = session.offer_deepening()
     assert result["offer"] == "你已经抓住核心，要不要再挖一层？"
     assert result["options"] == ["深入", "先到这里"]
     assert session.stage == "offer"
-    payload = transport.requests[2]["messages"][1]["content"]
+    payload = transport.requests[1]["messages"][1]["content"]
     assert "继续深入" in payload
 
 
@@ -663,13 +668,14 @@ def test_offer_deepening_requires_offer_stage() -> None:
 
 
 def test_choose_deepening_stop_finishes() -> None:
+    """V0.3.1 — 遗留 offer 阶段下「先到这里」仍然完成整个流程。"""
     session, _ = make_session(
         validation_task_reply("任务"),
         analysis_reply("relationship", understood=["核心"], quality="deep"),
     )
     cid = session.begin()
     session.start_validation()
-    session.submit_validation("回答")
+    session.stage = "offer"
     result = session.choose_deepening(False)
     assert result["stage"] == "complete"
     assert session.stage == "complete"
@@ -686,17 +692,16 @@ def test_choose_deepening_requires_offer_stage() -> None:
 
 
 def test_choose_deepening_go_starts_intervention_loop() -> None:
+    """V0.3.1 — 遗留 offer 阶段下选择深入仍可进入干预循环。"""
     session, _ = make_session(
         validation_task_reply("任务"),
-        analysis_reply("relationship", understood=["核心"], quality="deep"),
         offer_reply("要不要再挖一层？"),
         intervention_reply("example", "想想你周末放弃游戏时间的选择"),
         update_reply("application", understood=["核心", "会应用"], next_best_action="none"),
-        intervention_reply("none", "", requires_user_response=False),
     )
     cid = session.begin()
     session.start_validation()
-    session.submit_validation("回答")
+    session.stage = "offer"
     session.offer_deepening()
     result = session.choose_deepening(True)
     assert result["stage"] == "intervention"
@@ -915,6 +920,7 @@ def test_restore_new_flow_validation_preserves_state() -> None:
 
 
 def test_restore_new_flow_offer_stage() -> None:
+    """V0.3.1 — 遗留 offer 阶段数据（老版本生成的）仍能恢复，交给 UI 自动收尾。"""
     session, _ = make_session(
         validation_task_reply("任务"),
         analysis_reply("relationship", understood=["核心"], quality="deep"),
@@ -922,7 +928,10 @@ def test_restore_new_flow_offer_stage() -> None:
     cid = session.begin()
     session.start_validation()
     session.submit_validation("回答")
-    assert session.stage == "offer"
+    assert session.stage == "complete"  # 主流程不再生成 offer
+    # 模拟老数据：把阶段手工改回 offer 并落库
+    session.stage = "offer"
+    session._persist_new_flow()
 
     restored = restore_session(cid)
     assert restored.flow == "new"
@@ -940,7 +949,6 @@ def test_restore_new_flow_complete_sets_connections_phase() -> None:
     cid = session.begin()
     session.start_validation()
     session.submit_validation("回答")
-    session.choose_deepening(False)
     assert session.stage == "complete"
     assert session.phase == "connections"
 
@@ -950,6 +958,44 @@ def test_restore_new_flow_complete_sets_connections_phase() -> None:
     assert restored.phase == "connections"
     assert restored.learner_state.understanding_level == "relationship"
     assert restored.current_intervention() is None
+
+
+# ------------------------------------------------------ V0.3.1 auto summary
+
+
+def test_finish_auto_generates_summary_from_validation() -> None:
+    """V0.3.1 — 完成即自动生成总结：用最新验证回答做素材，落库并更新掌握度。"""
+    session, transport = make_session(
+        validation_task_reply("任务"),
+        analysis_reply("relationship", understood=["理解了核心含义"], quality="deep"),
+        summary_reply("我终于搞懂了机会成本", "明天想一个反例"),
+    )
+    cid = session.begin()
+    session.start_validation()
+    session.submit_validation("机会成本就是我放弃的那个最好的选择")
+    assert session.stage == "complete"
+
+    summary = session.finish_auto()
+    assert summary.breakthrough == "我终于搞懂了机会成本"
+    assert summary.tomorrow_hook == "明天想一个反例"
+    assert session.phase == "finished"
+
+    row = database.get_concept(cid)
+    assert row["mastery"] == "搞懂了"
+    assert row["user_definition"] == "机会成本就是我放弃的那个最好的选择"
+    today = database.get_today_summary()
+    assert today is not None
+    assert today["breakthrough_text"] == "我终于搞懂了机会成本"
+    assert today["tomorrow_hook"] == "明天想一个反例"
+    payload = transport.requests[2]["messages"][1]["content"]
+    assert "机会成本就是我放弃的那个最好的选择" in payload
+
+
+def test_finish_auto_requires_complete_stage() -> None:
+    session, _ = make_session()
+    session.begin()
+    with pytest.raises(SessionError, match="complete"):
+        session.finish_auto()
 
 
 # ------------------------------------------------------ V0.3.1 user signals

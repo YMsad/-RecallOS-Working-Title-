@@ -416,6 +416,41 @@ class LearningSession:
         logger.info("Session finished for concept %s (mastery=%s)", self.title, mastery)
         return self.summary
 
+    def finish_auto(self) -> SummaryResult:
+        """V0.3.1 — 学习完成即自动生成总结，无需用户再输入「自己的话」。
+
+        以验证/干预回答中最新的理解为「我的理解」素材，直接生成每日总结
+        （breakthrough + tomorrow_hook）并落库。
+        """
+        cid = self._require_started()
+        if self.stage != "complete":
+            raise SessionError("finish_auto can only be called at complete stage")
+
+        definition = ""
+        for entry in reversed(self.validation_history):
+            if entry.get("answer"):
+                definition = str(entry["answer"])
+                break
+        prompt = summary_prompt(
+            title=self.title,
+            user_definition=definition,
+            qa_history=self._format_new_flow_history(),
+        )
+        reply = self.client.chat(build_messages(prompt), temperature=OTHER_TEMPERATURE)
+        self.summary = validate_response(reply, SummaryResult)
+
+        save_daily_summary(cid, self.summary.breakthrough, self.summary.tomorrow_hook)
+        mastery = MASTERY_UNCLEAR if self.marked_uncertain else MASTERY_UNDERSTOOD
+        update_concept(
+            cid,
+            user_definition=definition or None,
+            mastery=mastery,
+            stage="complete",
+        )
+        self.phase = "finished"
+        logger.info("Session auto-finished for concept %s (mastery=%s)", self.title, mastery)
+        return self.summary
+
     # ----------------------------------------------------- V0.3.0 validation
 
     def start_validation(self) -> str:
@@ -586,18 +621,22 @@ class LearningSession:
         if not self.learner_state.has_gap():
             self.validation_passed = True
             self.validation_attempts = 0
-            self.stage = "offer"
-            self._persist_new_flow()
             logger.info(
                 "Validation passed for concept %s (level=%s)",
                 self.title,
                 self.learner_state.understanding_level,
             )
-            return {
-                "stage": "offer",
-                "understanding_level": self.learner_state.understanding_level,
-                "quality": self.learner_state.last_response_quality,
-            }
+            # V0.3.1 — 验证过即完：没有理解缺口直接完成（深入/连接变为可选，
+            # 不再强迫用户做「是否深入」的选择）。
+            return self._finish_new_flow(
+                final_intervention={
+                    "action": "none",
+                    "content": (
+                        f"你的理解已经到位（层级："
+                        f"{self.learner_state.understanding_level}），可以放心记下了。"
+                    ),
+                }
+            )
 
         intervention = self._decide_intervention(mode="validation")
         if intervention is None:
@@ -700,7 +739,7 @@ class LearningSession:
             )
         self.validation_passed = True
         self.validation_attempts = 0
-        self.stage = "offer"
+        self.stage = "complete"
         self.validation_history.append(
             {
                 "answer": "(由用户选择跳过，未经过 AI 判断)",
@@ -710,6 +749,7 @@ class LearningSession:
             }
         )
         self._persist_new_flow()
+        add_to_review_queue(cid)
         logger.info(
             "Validation manually skipped (pass) for concept %s (id=%s)", self.title, cid
         )
@@ -1261,6 +1301,19 @@ class LearningSession:
             hint = f"（提示：{qa['hint']}）" if qa.get("hint") else ""
             lines.append(f"{i}. 问题：{qa['question']}")
             lines.append(f"   回答：{qa['answer']}{hint}")
+        return "\n".join(lines)
+
+    def _format_new_flow_history(self) -> str:
+        """V0.3.1 — 新流程的总结素材：验证回答 + 干预/深化追问记录。"""
+        lines: list[str] = []
+        for v in self.validation_history:
+            ans = v.get("answer")
+            if ans:
+                lines.append(f"验证回答：{ans}")
+        for d in self.deeper_history:
+            if d.get("question") and d.get("answer"):
+                lines.append(f"追问：{d['question']}")
+                lines.append(f"回答：{d['answer']}")
         return "\n".join(lines)
 
 

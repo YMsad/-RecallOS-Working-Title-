@@ -280,11 +280,10 @@ def test_app_history_view(monkeypatch, configured_app) -> None:
 
 
 def test_app_mode_toggle_on_home(configured_app, legacy_flow) -> None:
-    """旧流程首页保留「有基础」切换（新流程首页不再显示）。"""
+    """V0.3.1 — 模式切换已彻底移除：即使旧流程下首页也不再显示「有基础」切换。"""
     at = AppTest.from_file(APP, default_timeout=15).run()
     assert not at.exception
-    assert len(at.toggle) == 1
-    assert "有基础" in at.toggle[0].label
+    assert len(at.toggle) == 0
 
 
 def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app, legacy_flow) -> None:
@@ -731,44 +730,38 @@ def test_app_new_flow_home_goal_selector(configured_app) -> None:
     assert database.get_concept(session.concept_id)["learning_goal"] == "apply"
 
 
-def test_app_new_flow_reading_signal_buttons_and_stuck(
-    monkeypatch, configured_app
-) -> None:
-    """V0.3.1 — 阅读阶段 🤔💡✓ 标记 + 卡住点输入，全部可选、不阻塞流程。"""
+def test_app_new_flow_reading_split_with_guidance(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 阅读拆段+逐段引导：信号按钮与卡住点输入已移除，改为引导提示。"""
     fake = FakeClient([])
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
     assert at.session_state["session"].stage == "reading"
 
-    # 点「🤔 没看懂」→ 记录信号并落库，页面出现卡住点输入
-    at = at.button(key="v_rs_c_0").click().run()
-    assert not at.exception
-    session = at.session_state["session"]
-    assert session.reading_signals == [{"kind": "confused", "position": 0}]
-    assert database.get_concept(session.concept_id)["signals"]
-    assert "没看懂" in markdown_text(at)
+    # 拆段展示 + 逐段引导提示
+    assert "第 1 段 / 共 1 段" in markdown_text(at)
+    assert any("读这一段时" in (c.value or "") for c in at.caption)
+    # 阅读信号按钮（🤔💡✓）与卡住点输入不再出现
+    assert not any(b.key and b.key.startswith("v_rs_") for b in at.button)
+    assert not any(t.key == "v_stuck_text" for t in at.text_input)
 
-    # 输入卡住点并保存
-    at.text_input(key="v_stuck_text").input("边界不知道算不算").run()
-    assert not at.exception
-    at = click_by_label(at, "保存")
-    assert not at.exception
-    session = at.session_state["session"]
-    # V0.3.0 patch 1 — 点「🤔」也自动生成一条卡住点，与手填的内容并存
-    assert "阅读原文第 1 段时用户标了「没看懂」" in session.stuck_points
-    assert "边界不知道算不算" in session.stuck_points
-    assert "边界不知道算不算" in session.learner_state.uncertain
-
-    # 再点「✓ 我懂了」也记录（混合信号不互相覆盖）
-    at = at.button(key="v_rs_k_0").click().run()
-    assert not at.exception
-    session = at.session_state["session"]
-    kinds = [s["kind"] for s in session.reading_signals]
-    assert kinds == ["confused", "clear"]
-
-    # 标记不影响流程：仍然可以正常开始验证
+    # 阅读不阻塞：仍然可以正常开始验证
     at = click_by_label(at, "我读完了，开始验证")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_no_source_skips_to_validation(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 没有原文时，阅读阶段直接提供「直接开始验证」。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+    assert any("直接开始验证" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "直接开始验证")
     assert not at.exception
     assert at.session_state["session"].stage == "validation"
 
@@ -811,7 +804,8 @@ def test_app_new_flow_intervention_feedback_ui(monkeypatch, configured_app) -> N
     assert database.get_concept(session.concept_id)["intervention_feedback"]
 
 
-def test_app_new_flow_validation_pass_goes_offer(monkeypatch, configured_app) -> None:
+def test_app_new_flow_validation_pass_goes_complete(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 验证过即完：无理解缺口直接完成，不再询问「是否深入」。"""
     fake = FakeClient([])
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -821,14 +815,15 @@ def test_app_new_flow_validation_pass_goes_offer(monkeypatch, configured_app) ->
     assert not at.exception
     session = at.session_state["session"]
     assert session.validation_passed is True
-    assert session.stage == "offer"
-    # ✅ 通过气泡 + 自动生成的深入邀请气泡
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    # 完成通知气泡（含层级）+ 完成页
     msgs = at.session_state["messages"]
-    assert any("你已经理解核心概念" in m["text"] for m in msgs)
-    assert any("要不要再挖一层" in m["text"] for m in msgs)
-    # offer 阶段渲染出两个选择按钮
-    assert any("我想再深入一层" in (b.label or "") for b in at.button)
-    assert any("先到这里" in (b.label or "") for b in at.button)
+    assert any("你的理解已经到位" in m["text"] for m in msgs)
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    # 不再出现 offer 的深入选择按钮
+    assert not any("我想再深入一层" in (b.label or "") for b in at.button)
+    assert not any("先到这里" in (b.label or "") for b in at.button)
 
 
 def test_app_new_flow_validation_gap_enters_intervention(monkeypatch, configured_app) -> None:
@@ -883,31 +878,69 @@ def test_app_new_flow_intervention_answer_stops_when_understand(monkeypatch, con
     session = at.session_state["session"]
     assert session.stage == "complete"
     assert session.phase == "connections"
-    assert any("这一步已经完成" in (s.value or "") for s in at.success)
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
     assert len(session.deeper_history) == 1
     assert session.deeper_history[0]["next_best_action"] == "none"
 
 
-def test_app_new_flow_complete_goes_to_connections(monkeypatch, configured_app) -> None:
+def test_app_new_flow_complete_goes_to_summary(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 完成即总结：验证通过后点「查看今日总结」，总结自动生成无需输入。"""
     fake = FakeClient([])
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
     at = _start_new_flow(at)
     at = click_by_label(at, "我读完了，开始验证")
-    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过 → offer
-    assert not at.exception
-    # 用户主动选择「先到这里」→ 完成并进入复习队列
-    at = click_by_label(at, "先到这里")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过 → 完成
     assert not at.exception
     session = at.session_state["session"]
     assert session.stage == "complete"
-    assert session.phase == "connections"
-    assert any("这一步已经完成" in (s.value or "") for s in at.success)
 
-    at = click_by_label(at, "进入总结")
+    at = click_by_label(at, "查看今日总结")
     assert not at.exception
-    assert current_step(at) == "connections"
-    assert "发现一些知识连接" in markdown_text(at)
+    assert current_step(at) == "summary"
+    # 自动生成：无需手动输入，总结直接出现在页面上
+    assert "summary_result" in at.session_state
+    assert "明天再想" in markdown_text(at)
+    today = database.get_today_summary()
+    assert today is not None
+    assert today["breakthrough_text"] == "我终于搞懂了机会成本"
+    assert database.get_setting("streak") == "1"
+    # 自动把最新验证回答记成「我的理解」
+    concept = database.get_concept(session.concept_id)
+    assert concept["user_definition"] == "机会成本就是放弃的次优选择"
+    assert concept["mastery"] == "搞懂了"
+
+
+def test_app_summary_auto_timeout_shows_retry(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 自动总结 AI 超时：不崩，展示重试按钮，重试后恢复。"""
+    fake = FlakyClient([])
+
+    class FailingSummaryClient(FakeClient):
+        def __init__(self, inner: FakeClient) -> None:
+            super().__init__([])
+            self._inner = inner
+            self._calls = 0
+
+        def chat(self, messages, **kwargs) -> str:
+            user = messages[1]["content"]
+            if "每日总结" in user:
+                self._calls += 1
+                if self._calls == 1:
+                    raise DeepSeekNetworkError("Request timed out: 模拟超时")
+            return self._inner.chat(messages, **kwargs)
+
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FailingSummaryClient(fake))
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了，开始验证")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    at = click_by_label(at, "查看今日总结")
+    assert not at.exception
+    assert "summary_error" in at.session_state
+    assert any("重试" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "重试")
+    assert not at.exception
+    assert "summary_result" in at.session_state
 
 
 def test_app_validation_timeout_retry_recovers(monkeypatch, configured_app) -> None:
@@ -922,29 +955,10 @@ def test_app_validation_timeout_retry_recovers(monkeypatch, configured_app) -> N
     session = at.session_state["session"]
     assert session.stage == "validation"  # 失败不前进
     assert any("❌" in m["text"] for m in at.session_state["messages"] if m["text"])
-    # 再次提交同一答案 → 分析成功 → 进入 offer
+    # 再次提交同一答案 → 分析成功 → 直接完成（无缺口）
     at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
     assert not at.exception
-    assert at.session_state["session"].stage == "offer"
-
-
-def test_app_offer_timeout_shows_retry_and_recovers(monkeypatch, configured_app) -> None:
-    """深入邀请 AI 超时：记录错误并展示重试按钮，重试成功后恢复 offer 阶段。"""
-    fake = FlakyClient([], fail_offer=1)
-    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
-    at = AppTest.from_file(APP, default_timeout=30).run()
-    at = _start_new_flow(at)
-    at = click_by_label(at, "我读完了，开始验证")
-    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 通过 → offer
-    assert not at.exception
-    assert at.session_state["session"].stage == "offer"
-    assert ("v_ai_error" in at.session_state)
-    assert any("重试" in (b.label or "") for b in at.button)
-    # 点重试 → 第二次生成成功 → 显示深入/先到这里
-    at = click_by_label(at, "重试")
-    assert not at.exception
-    assert "v_ai_error" not in at.session_state
-    assert any("我想再深入一层" in (b.label or "") for b in at.button)
+    assert at.session_state["session"].stage == "complete"
 
 
 class JunkTaskClient(FakeClient):
@@ -1054,7 +1068,7 @@ def test_app_continue_new_flow_resumes_validation(configured_app) -> None:
 
 
 def test_app_continue_new_flow_resumes_offer(monkeypatch, configured_app) -> None:
-    """验证通过后中断：恢复后停在 offer 阶段，自动生成深入邀请等待用户选择。"""
+    """V0.3.1 — offer 残留会话（老数据）恢复后自动完成，不再询问「是否深入」。"""
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient([]))
     cid = _seed_new_flow_concept(
         stage="offer",
@@ -1080,13 +1094,11 @@ def test_app_continue_new_flow_resumes_offer(monkeypatch, configured_app) -> Non
 
     session = at.session_state["session"]
     assert session.flow == "new"
-    assert session.stage == "offer"
+    assert session.stage == "complete"  # V0.3.1 — offer 残留会话自动视为完成
     assert session.validation_passed is True
-    # 重建气泡：通过通知 + 自动生成的深入邀请
-    msgs = at.session_state["messages"]
-    assert any("你已经理解核心概念" in m["text"] for m in msgs)
-    assert any("要不要再挖一层" in m["text"] for m in msgs)
-    assert any("我想再深入一层" in (b.label or "") for b in at.button)
+    # 完成页出现，不再问「是否深入」
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    assert not any("我想再深入一层" in (b.label or "") for b in at.button)
 
 
 def test_app_continue_new_flow_resumes_intervention(monkeypatch, configured_app) -> None:
@@ -1262,3 +1274,91 @@ def test_app_history_legacy_qa_records_still_shown(configured_app) -> None:
     assert "和沉没成本的区别？" in text
     assert "一个看过去" in text
     assert "（用过提示）" in text
+
+
+# ---------------------------------------------------------------- V0.3.1 内置内容
+
+
+def test_builtin_concepts_module() -> None:
+    """V0.3.1 — 内置概念模块：5 个精选概念 + 查询接口。"""
+    from core.builtin_concepts import (
+        BUILTIN_CONCEPTS,
+        get_builtin_concept,
+        get_builtin_concepts,
+    )
+
+    assert len(get_builtin_concepts()) == 5
+    assert len(BUILTIN_CONCEPTS) == 5
+    for c in get_builtin_concepts():
+        assert c["id"] and c["title"] and c["source_text"]
+        assert c["difficulty"] in (1, 2)
+    c = get_builtin_concept("opportunity_cost")
+    assert c is not None and c["title"] == "机会成本"
+    assert "放弃" in c["source_text"]
+    assert get_builtin_concept("not_a_concept") is None
+
+
+def test_app_home_shows_builtin_featured_concepts(configured_app) -> None:
+    """V0.3.1 — 首页「精选概念」卡片：零输入即可开始学习。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert "精选概念" in markdown_text(at)
+    for title in ("机会成本", "复利", "幸存者偏差", "边际效用", "沉没成本"):
+        assert any(f"📖 {title}" in (b.label or "") for b in at.button)
+
+
+def test_app_first_open_recommends_a_builtin(configured_app) -> None:
+    """V0.3.1 — 首次打开（还没有任何概念时）自动推荐一个内置概念。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert any("先从一个精选概念开始" in (i.value or "") for i in at.info)
+
+
+def test_app_first_open_recommend_hidden_after_learning(configured_app) -> None:
+    """V0.3.1 — 已有学习记录后，不再显示首次打开推荐。"""
+    database.save_concept("自定义概念", "原文")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert not any("先从一个精选概念开始" in (i.value or "") for i in at.info)
+
+
+def test_app_builtin_concept_starts_learning_without_input(configured_app) -> None:
+    """V0.3.1 — 点击精选概念卡片：无需输入直接进入阅读阶段，原文自动带好。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = at.button(key="builtin_opportunity_cost").click().run()
+    assert not at.exception
+    assert current_step(at) == "learning"
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "reading"
+    assert session.title == "机会成本"
+    assert "机会成本" in session.source_text
+    concept = database.get_concept(session.concept_id)
+    assert concept["title"] == "机会成本"
+    assert concept["source_text"]
+
+
+def test_app_history_add_connection(configured_app) -> None:
+    """V0.3.1 — 连接移到历史页：可在概念详情里主动添加知识连接。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    # 展开概念 b 的详情（a 已被首次进入时自动展开，再点会收起）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+
+    # 点「添加知识连接」→ 表单出现，选择 a 并保存
+    at = at.button(key=f"add_conn_{b}").click().run()
+    assert not at.exception
+    at.selectbox(key=f"conn_pick_{b}").select("机会成本")
+    at.text_area(key=f"conn_rel_{b}").input("都关于选择")
+    at = at.button(key=f"conn_save_{b}").click().run()
+    assert not at.exception
+    conns = database.get_connections(b)
+    assert len(conns) == 1
+    assert conns[0]["concept_a_title"] == "机会成本"
+    assert conns[0]["relation_text"] == "都关于选择"
