@@ -71,6 +71,8 @@ class LearnerState:
         misconceptions: list[str] | None = None,
         last_response_quality: str = ResponseQuality.PARTIAL.value,
         next_best_action: str = ActionType.NONE.value,
+        learning_goal: str = "understand",
+        intervention_history: list[dict[str, Any]] | None = None,
     ) -> None:
         self.understanding_level = understanding_level
         self.understood: list[str] = list(understood or [])
@@ -78,6 +80,11 @@ class LearnerState:
         self.misconceptions: list[str] = list(misconceptions or [])
         self.last_response_quality = last_response_quality
         self.next_best_action = next_best_action
+        # V0.3.1 — 用户信号输入：学习目标 + 干预效果历史
+        self.learning_goal = learning_goal
+        self.intervention_history: list[dict[str, Any]] = list(
+            intervention_history or []
+        )
 
     # ------------------------------------------------------------------- shape
 
@@ -89,6 +96,8 @@ class LearnerState:
             "misconceptions": list(self.misconceptions),
             "last_response_quality": self.last_response_quality,
             "next_best_action": self.next_best_action,
+            "learning_goal": self.learning_goal,
+            "intervention_history": list(self.intervention_history),
         }
 
     @classmethod
@@ -102,6 +111,10 @@ class LearnerState:
             misconceptions=[str(x) for x in data.get("misconceptions") or []],
             last_response_quality=str(data.get("last_response_quality", "partial")),
             next_best_action=str(data.get("next_best_action", "none")),
+            learning_goal=str(data.get("learning_goal") or "understand"),
+            intervention_history=[
+                dict(x) for x in data.get("intervention_history") or []
+            ],
         )
 
     # --------------------------------------------------------------- analysis

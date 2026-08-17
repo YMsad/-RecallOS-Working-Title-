@@ -669,10 +669,21 @@ def learner_state_analyzer_prompt(
     task: str,
     user_answer: str,
     context: str = "",
+    learning_goal: str = "understand",
+    stuck_points: str = "",
+    confidence_prediction: str = "",
 ) -> str:
     """Analyse the learner's closed-book explanation into a Learner State
     snapshot. Returns JSON validated by :class:`LearnerStateAnalysis`."""
     context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    goal_hint = {
+        "understand": "目标：理解概念本身。达到 relationship（能讲清概念之间的关系/条件）即算达标。",
+        "connect": "目标：建立联系。需要用户把概念与其他概念、场景或条件联系起来才算达标。",
+        "apply": "目标：能实际应用。达到 application（能说明如何用于真实情境）才算达标。",
+        "exam": "目标：为考试掌握。要求表达严谨、术语准确、无遗漏才算达标。",
+    }.get(learning_goal, "目标：理解概念本身。")
+    stuck_block = f"\n阅读时用户自述卡住的地方（请据此补充 uncertain）：\n{stuck_points}" if stuck_points else ""
+    confidence_block = f"\n用户在解释前自评：{confidence_prediction}（判断时可参考其校准情况）" if confidence_prediction else ""
     return _fill(
         """你是 RecallOS 的学习者状态分析器。
 
@@ -685,19 +696,23 @@ def learner_state_analyzer_prompt(
 - application：能说明这个概念如何用于实际情况
 - essence：能解释概念为什么成立、解决什么问题或底层逻辑
 
+{goal_hint}
+
 规则：
 1. 以 source_text 为主要依据，不凭常识替换原文含义。
 2. 表达方式不同但含义正确，应判为理解。
 3. 有核心误解时写入 misconceptions。
 4. 不因回答简短而降低层级判断。
-5. understood / uncertain / misconceptions 各自只列最重要的 1-3 条，用短句。
-6. 只输出合法 JSON，不要 Markdown 或解释。
+5. 用户自述卡住的地方应尽量保留在 uncertain 里。
+6. understood / uncertain / misconceptions 各自只列最重要的 1-3 条，用短句。
+7. 只输出合法 JSON，不要 Markdown 或解释。
 
 输入：
 concept: {concept}
 source_text: {source_text}
 task: {task}
-user_answer: {user_answer}{context_block}
+user_answer: {user_answer}
+学习目标：{goal_hint}{stuck_block}{confidence_block}{context_block}
 
 输出 JSON 格式：
 {"understanding_level": "relationship", "understood": ["理解了选择与放弃之间的关系"], "uncertain": ["没有明确理解机会成本只关注最佳替代方案"], "misconceptions": [], "last_response_quality": "partial"}""",
@@ -706,6 +721,9 @@ user_answer: {user_answer}{context_block}
         task=task,
         user_answer=user_answer,
         context_block=context_block,
+        goal_hint=goal_hint,
+        stuck_block=stuck_block,
+        confidence_block=confidence_block,
     )
 
 
@@ -717,10 +735,16 @@ def intervention_decider_prompt(
     current_target: str = "",
     mode: str = "validation",
     context: str = "",
+    intervention_history: str = "",
 ) -> str:
     """Decide whether / how to intervene next (minimal intervention). Returns
     JSON validated by :class:`Intervention`."""
     context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    history_block = (
+        f"\n\n用户对已给干预的反馈（用于选择下一种干预方式）：\n{intervention_history}"
+        if intervention_history
+        else ""
+    )
     mode_hint = (
         "当前处于验证阶段：目标是确认/修复对核心含义的理解。"
         if mode == "validation"
@@ -741,7 +765,8 @@ none → hint → example / analogy → counterexample → question → 解释
 2. content 只给"刚好让用户能继续思考"的内容，绝不直接给出完整答案。
 3. 用户仍有缺口但干预已没有价值时，action=none 并结束。
 4. requires_user_response：需要用户重新回答时为 true；直接给出收尾解释时为 false。
-5. 只输出合法 JSON。
+5. 参考过往干预反馈：用户对某类干预（类比/例子/提示/反例）说"清楚多了"时，优先再用同类的更简单版本；对某类说"还是有点懵"时，换一种方式。
+6. 只输出合法 JSON。
 
 {mode_hint}
 
@@ -749,7 +774,7 @@ none → hint → example / analogy → counterexample → question → 解释
 concept: {concept}
 source_text: {source_text}
 当前目标：{current_target}
-learner_state: {learner_state}{context_block}
+learner_state: {learner_state}{history_block}{context_block}
 
 输出 JSON 格式：
 {"action": "counterexample", "reason": "用户理解了基本关系，但无法识别概念边界", "content": "如果你放弃了三个选择，机会成本是不是三个选择加起来？为什么？", "requires_user_response": true}""",
@@ -758,6 +783,7 @@ learner_state: {learner_state}{context_block}
         learner_state=learner_state,
         current_target=current_target or "验证任务",
         mode_hint=mode_hint,
+        history_block=history_block,
         context_block=context_block,
     )
 
@@ -770,10 +796,17 @@ def learner_state_updater_prompt(
     user_answer: str,
     learner_state: str,
     context: str = "",
+    learning_goal: str = "understand",
 ) -> str:
     """Update the Learner State from the learner's newest answer. Returns JSON
     validated by :class:`LearnerStateUpdate`."""
     context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    goal_hint = {
+        "understand": "目标：理解概念本身，达到 relationship 即算达标。",
+        "connect": "目标：建立联系，需要能联系到其他概念/场景。",
+        "apply": "目标：能实际应用，达到 application 才算达标。",
+        "exam": "目标：为考试掌握，要求表达严谨、术语准确。",
+    }.get(learning_goal, "")
     return _fill(
         """你是 RecallOS 的学习状态更新器。
 
@@ -787,6 +820,8 @@ def learner_state_updater_prompt(
 - essence：理解底层逻辑、因果机制或存在原因
 
 next_best_action 是 AI 下一步最值得做的动作：none / hint / analogy / example / counterexample / question。
+
+{goal_hint}
 
 规则：
 1. 不以回答长短判断质量。
@@ -807,6 +842,7 @@ learner_state: {learner_state}{context_block}
         intervention=intervention,
         user_answer=user_answer,
         learner_state=learner_state,
+        goal_hint=goal_hint,
         context_block=context_block,
     )
 

@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS concepts (
     deeper_questions TEXT,
     deeper_answers TEXT,
     deeper_index INTEGER NOT NULL DEFAULT 0,
-    stage TEXT
+    stage TEXT,
+    learning_goal TEXT,
+    intervention_feedback TEXT,
+    signals TEXT
 );
 
 CREATE TABLE IF NOT EXISTS qa_records (
@@ -175,6 +178,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("deeper_answers", "deeper_answers TEXT"),
         ("deeper_index", "deeper_index INTEGER NOT NULL DEFAULT 0"),
         ("stage", "stage TEXT"),
+        # ---- V0.3.1 — 用户信号输入（学习目标 / 干预反馈 / 阅读信号等）----
+        ("learning_goal", "learning_goal TEXT"),
+        ("intervention_feedback", "intervention_feedback TEXT"),
+        ("signals", "signals TEXT"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE concepts ADD COLUMN {ddl}")
@@ -244,6 +251,9 @@ def update_concept(
     deeper_questions: str | None = None,
     deeper_answers: str | None = None,
     deeper_index: int | None = None,
+    learning_goal: str | None = None,
+    intervention_feedback: str | None = None,
+    signals: str | None = None,
 ) -> bool:
     """Update any subset of a concept's fields. Returns True if a row changed."""
     if mastery is not None and mastery not in MASTERY_VALUES:
@@ -290,6 +300,13 @@ def update_concept(
         fields["deeper_answers"] = deeper_answers
     if deeper_index is not None:
         fields["deeper_index"] = int(deeper_index)
+    # ---- V0.3.1 — 用户信号输入字段（None 表示不更新；'' 表示写入空串）----
+    if learning_goal is not None:
+        fields["learning_goal"] = learning_goal
+    if intervention_feedback is not None:
+        fields["intervention_feedback"] = intervention_feedback
+    if signals is not None:
+        fields["signals"] = signals
     if not fields:
         return True
     set_clause = ", ".join(f"{key} = ?" for key in fields)

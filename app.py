@@ -197,6 +197,17 @@ def render_home() -> None:
     with col_title:
         title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
     source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
+
+    # V0.3.0 — 新的学习目标（可选，不选默认「理解概念」）
+    if _NEW_FLOW:
+        goal_options = ["🧠 理解概念", "🔗 建立联系", "🛠 能实际应用", "🎓 为考试掌握"]
+        st.radio(
+            "你这次更想做到哪一步？（可选）",
+            goal_options,
+            index=0,
+            horizontal=True,
+            key="v_learning_goal",
+        )
     with col_warm:
         if mode == "beginner" and title.strip():
             if st.button("💡 预热", key="warmup_btn"):
@@ -228,7 +239,21 @@ def render_home() -> None:
         elif _NEW_FLOW:
             # V0.3.0 — 新流程：只存概念，先进入「阅读原文」阶段
             try:
-                session = LearningSession(title, source)
+                goal_options = ["🧠 理解概念", "🔗 建立联系", "🛠 能实际应用", "🎓 为考试掌握"]
+                goal_map = {
+                    "🧠 理解概念": "understand",
+                    "🔗 建立联系": "connect",
+                    "🛠 能实际应用": "apply",
+                    "🎓 为考试掌握": "exam",
+                }
+                goal_label = st.session_state.get(
+                    "v_learning_goal", goal_options[0]
+                )
+                session = LearningSession(
+                    title,
+                    source,
+                    learning_goal=goal_map.get(goal_label, "understand"),
+                )
                 session.flow = "new"
                 session.begin()
                 st.session_state.session = session
@@ -380,6 +405,7 @@ _PENDING_SPINNERS = {
 def _run_pending(session: LearningSession) -> None:
     """执行按钮触发的、需要 AI 的待办动作（参数已放进 session_state）。"""
     action = st.session_state.get("pending_action")
+    print(f"[RecallOS][_run_pending] 开始 pending_action={action!r} stage={session.stage!r} has_answer={st.session_state.get('v_pending_answer') is not None}", flush=True)
     if not action:
         return
     try:
@@ -434,33 +460,146 @@ def _run_pending(session: LearningSession) -> None:
                         {"role": "assistant", "text": result["bubble"]})
         st.session_state.pop("pending_action", None)
     except DeepSeekAuthError:
+        print(f"[RecallOS][_run_pending][{action}] 失败：API Key 无效", flush=True)
         st.session_state.pop("pending_action", None)
         st.session_state.pop("v_pending_answer", None)
         st.session_state.messages.append({"role": "assistant", "text": "❌ Key 无效，请重新输入"})
     except (DeepSeekError, SessionError) as exc:
+        print(f"[RecallOS][_run_pending][{action}] 失败(可重试)：{exc!r}", flush=True)
         st.session_state.pop("pending_action", None)
         st.session_state.messages.append(
             {"role": "assistant", "text": f"❌ {exc}\n\n再试一次即可重试。"})
     except Exception as exc:  # noqa: BLE001 —— 兜底：任何异常都转成可重试提示，杜绝转圈卡死
         logger.exception("_run_pending[%s] 意外失败", action)
+        print(f"[RecallOS][_run_pending][{action}] 意外异常：{exc!r}", flush=True)
         st.session_state.pop("pending_action", None)
         st.session_state.pop("v_pending_answer", None)
         st.session_state.messages.append(
             {"role": "assistant", "text": f"❌ 出错了：{exc}，请再试一次。"})
 
 
-def _render_learning_new(session: LearningSession) -> None:
-    # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深化追问 → 完成
-    # 先执行按钮触发的 AI 待办，再按最新阶段渲染（不在按钮回调里直接调 AI）
+def _capture_chat_answer(session: LearningSession) -> None:
+    """在 `_run_pending` 之后捕获 chat_input 回答，并在同一 run 内立即消费。
+
+    绝不能在这里调用 st.rerun()：streamlit#7629 中 st.chat_input 的值会在手动
+    rerun 之后的 run 里被再次读到 → 同一个回答被重复提交/无限循环/界面无响应
+    （现象：验证通过后同一气泡连续出现多次）。回答由本 run 内的 _run_pending
+    直接处理，处理完 stage 已推进，因此页面渲染时按最新阶段画即可。
+    """
+    stage = session.stage
+    if stage == "validation":
+        placeholder, action = "合上原文，用自己的话把这件事讲清楚…", "submit_validation"
+    elif stage == "intervention" and session.current_intervention() is not None:
+        placeholder, action = "你的回答…", "submit_intervention"
+    else:
+        return
+    answer = st.chat_input(placeholder, key="v_chat")
+    print(f"[RecallOS][chat_input] stage={stage!r} action={action!r} answer={answer!r}", flush=True)
+    if not answer:
+        return
+    print(f"[RecallOS][chat_input] 已捕获回答 len={len(answer)}，交给 _run_pending 同 run 处理", flush=True)
+    st.session_state.messages.append({"role": "user", "text": answer})
+    st.session_state["v_pending_answer"] = answer
+    st.session_state["pending_action"] = action
     _run_pending(session)
+
+
+def _render_pre_answer_signals(session: LearningSession) -> None:
+    """在 chat_input 之前渲染可选的用户信号输入（信心预测 / 干预反馈）。
+
+    全部可选、不阻塞：用户可以直接跳过用 chat_input 作答。
+    """
+    if session.stage == "validation" and session.should_ask_confidence():
+        with st.container():
+            st.markdown("### 🔮 猜一下")
+            st.caption("被提问之前先做个预测（可选，不猜也能继续）：")
+            pick = st.radio(
+                "验证前的信心预测",
+                ["😊 应该可以讲清楚", "🤔 不确定，容易卡住"],
+                horizontal=True,
+                key="v_conf_pick",
+            )
+            if st.button("记录预测", key="v_conf_ok"):
+                session.record_confidence_prediction(
+                    "clear" if pick.startswith("😊") else "unsure"
+                )
+                st.rerun()
+    elif session.stage == "intervention" and session.feedback_pending():
+        with st.container():
+            st.markdown("### 💬 小反馈")
+            st.caption("刚才的提示有帮到你吗？（可选，也可以直接回答）")
+            pick = st.radio(
+                "干预反馈",
+                ["👍 清楚多了", "🤔 还是有点懵"],
+                horizontal=True,
+                key="v_fb_pick",
+            )
+            if st.button("提交反馈", key="v_fb_ok"):
+                session.record_intervention_feedback(
+                    "clear" if "清楚多了" in pick else "unclear"
+                )
+                st.rerun()
+
+
+def _reading_paragraphs(source_text: str) -> list[str]:
+    source_text = (source_text or "").strip()
+    if not source_text:
+        return []
+    return [p.strip() for p in source_text.split("\n\n") if p.strip()]
+
+
+def _render_stuck_signal(session: LearningSession) -> None:
+    """阅读阶段：有「🤔 没看懂」标记时，出现可选的「哪里卡住了？」输入框。"""
+    confused = [s for s in session.reading_signals if s.get("kind") == "confused"]
+    if not confused:
+        return
+    pos_text = "，".join(f"第 {s['position'] + 1} 段" for s in confused[:5])
+    if st.session_state.pop("v_stuck_saved", False):
+        st.session_state["v_stuck_text"] = ""
+    with st.expander(f"❓ 哪里卡住了？（已标 {len(confused)} 处：{pos_text}）"):
+        stuck = st.text_input("用一句话说说你卡在哪（可选）", key="v_stuck_text")
+        if st.button("保存", key="v_stuck_save") and stuck.strip():
+            session.record_stuck_point(stuck.strip())
+            st.session_state["v_stuck_saved"] = True
+            st.rerun()
+
+
+def _render_learning_new(session: LearningSession) -> None:
+    # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深入选择 → 最小干预 → 完成
+    # 先执行按钮触发的 AI 待办，再捕获 chat_input 回答（同一 run 内处理，
+    # 不 st.rerun()，规避 streamlit#7629），最后按最新阶段渲染。
+    _run_pending(session)
+    _render_pre_answer_signals(session)
+    _capture_chat_answer(session)
     stage = session.stage
 
     if stage == "reading":
         st.markdown("### 📖 阅读原文")
-        if session.source_text.strip():
-            st.markdown(session.source_text)
-        else:
+        paragraphs = _reading_paragraphs(session.source_text)
+        if not paragraphs:
             st.info("没有粘贴原文，直接开始验证也可以。")
+        for i, para in enumerate(paragraphs):
+            st.markdown(para)
+            # V0.3.0 — 阅读中的理解信号（可选，不点也能继续）
+            c1, c2, c3 = st.columns(3)
+            if c1.button("🤔", key=f"v_rs_c_{i}", help="没看懂"):
+                session.record_reading_signal("confused", i)
+                st.rerun()
+            if c2.button("💡", key=f"v_rs_m_{i}", help="大概懂"):
+                session.record_reading_signal("match", i)
+                st.rerun()
+            if c3.button("✓", key=f"v_rs_k_{i}", help="我懂了"):
+                session.record_reading_signal("clear", i)
+                st.rerun()
+        _render_stuck_signal(session)
+        if session.reading_signals:
+            kinds = {
+                "confused": "🤔",
+                "match": "💡",
+                "clear": "✓",
+            }
+            counts = {k: sum(1 for s in session.reading_signals if s.get("kind") == k) for k in kinds}
+            st.caption("已标记：" + "、".join(f"{kinds[k]} {counts[k]}" for k in kinds if counts[k]))
         if st.button("我读完了，开始验证", key="v_read_done"):
             st.session_state["pending_action"] = "start_validation"
             st.rerun()
@@ -478,12 +617,6 @@ def _render_learning_new(session: LearningSession) -> None:
             st.session_state["pending_action"] = "ask_simplify"
             st.rerun()
 
-        answer = st.chat_input("合上原文，用自己的话把这件事讲清楚…")
-        if answer:
-            st.session_state.messages.append({"role": "user", "text": answer})
-            st.session_state["v_pending_answer"] = answer
-            st.session_state["pending_action"] = "submit_validation"
-            st.rerun()
         render_messages()
         return
 
@@ -527,8 +660,9 @@ def _render_learning_new(session: LearningSession) -> None:
                 st.session_state["v_offer"] = offer["offer"]
                 st.session_state.messages.append(
                     {"role": "assistant", "text": f"🎯 {offer['offer']}"})
-                st.rerun()
-                return
+                # 不 st.rerun()：本 run 继续渲染「继续深入？」区（streamlit#7629 防护）
+
+            offer_text = st.session_state.get("v_offer")
 
         if offer_text is None:
             st.success("✅ 理解这一步已经完成。")
@@ -612,12 +746,6 @@ def _render_learning_new(session: LearningSession) -> None:
             return
 
         st.caption("跟着提示想一想，用自己的话回答就好，不用追求标准答案。")
-        answer = st.chat_input("你的回答…")
-        if answer:
-            st.session_state.messages.append({"role": "user", "text": answer})
-            st.session_state["v_pending_answer"] = answer
-            st.session_state["pending_action"] = "submit_intervention"
-            st.rerun()
         render_messages()
         return
 
@@ -673,7 +801,7 @@ def render_review() -> None:
 
     st.markdown(f"## 📝 复习：{session.title}")
 
-    answer = st.chat_input("你的回答…")
+    answer = st.chat_input("你的回答…", key="v_chat_review")
 
     if not st.session_state.get("review_messages"):
         try:
@@ -703,16 +831,14 @@ def render_review() -> None:
                 {"role": "assistant", "text": reply})
             if session.phase == "finished":
                 st.session_state.review_finished = True
-            st.rerun()
         except DeepSeekAuthError:
             st.session_state.review_messages.append(
                 {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            st.rerun()
         except (DeepSeekError, SessionError) as exc:
             st.session_state.review_messages.append(
                 {"role": "assistant", "text": f"❌ {exc}"})
-            st.rerun()
-        return
+        # 不 st.rerun()：同 run 内继续渲染以下气泡（st.chat_input 提交后手动
+        # rerun 会触发 streamlit#7629 —— 同一个值被再次读到、无限循环/无响应）
 
     for m in st.session_state.review_messages:
         role = m["role"]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import warnings
 from functools import wraps
 from typing import Any, Callable
@@ -68,6 +69,15 @@ QUESTION_TEMPERATURE = 0.7
 JUDGE_TEMPERATURE = 0.0
 OTHER_TEMPERATURE = 0.3
 VALIDATION_MAX_ATTEMPTS = 3
+
+# V0.3.1 — 用户信号输入
+LEARNING_GOALS = {
+    "understand": "🧠 理解概念",
+    "connect": "🔗 建立联系",
+    "apply": "🛠 能实际应用",
+    "exam": "🎓 为考试掌握",
+}
+CONFIDENCE_PROMPT_RATE = 0.3  # 验证前偶尔让用户预测一次能否解释清楚
 
 _INTERVENTION_ICONS = {
     "hint": "💡",
@@ -136,6 +146,7 @@ class LearningSession:
         mode: str = "beginner",
         level: str = "zero",
         interest: str = "simple",
+        learning_goal: str = "understand",
     ) -> None:
         self.title = title.strip()
         self.source_text = source_text
@@ -145,6 +156,9 @@ class LearningSession:
         self.level = level if level in ("zero", "some", "familiar") else "zero"
         self.interest = (
             interest if interest in ("simple", "deep", "example") else "simple"
+        )
+        self.learning_goal = (
+            learning_goal if learning_goal in LEARNING_GOALS else "understand"
         )
 
         # State
@@ -183,6 +197,14 @@ class LearningSession:
         self.validation_difficulty: int | None = None
         self._current_intervention: dict[str, Any] | None = None
         self._offer: dict[str, Any] | None = None
+
+        # V0.3.1 — 用户信号输入（全部可选，不阻塞学习流程）
+        self.reading_signals: list[dict[str, Any]] = []
+        self.stuck_points: list[str] = []
+        self.confidence_predictions: list[dict[str, Any]] = []
+        self.intervention_feedback_list: list[dict[str, Any]] = []
+        self._ask_confidence_this_round: bool = False
+        self._intervention_feedback_given: bool = False
 
     # ------------------------------------------------------------------ flow
 
@@ -398,13 +420,103 @@ class LearningSession:
         self.validation_attempts = 0
         self.validation_passed = False
         self.needs_relearning = False
-        self.learner_state = LearnerState()
+        self.learner_state = LearnerState(learning_goal=self.learning_goal)
         self._current_intervention = None
         self._offer = None
+        self._ask_confidence_this_round = random.random() < CONFIDENCE_PROMPT_RATE
+        self._intervention_feedback_given = False
         self.stage = "validation"
         self._persist_new_flow()
         logger.info("Validation started for concept %s (id=%s)", self.title, cid)
         return self.validation_task
+
+    # ----------------------------------------------- V0.3.1 user signals
+
+    def record_reading_signal(self, kind: str, position: int) -> None:
+        """Record a light reading-time understanding marker.
+
+        ``kind`` is one of ``confused`` / ``match`` / ``clear``. Position is the
+        0-based index of the paragraph the user marked.
+        """
+        self.reading_signals.append({"kind": kind, "position": int(position)})
+        self._persist_new_flow()
+
+    def record_stuck_point(self, text: str) -> None:
+        """Record a concrete stuck point; it feeds into LearnerState.uncertain."""
+        text = text.strip()
+        if not text:
+            return
+        self.stuck_points.append(text)
+        if text not in self.learner_state.uncertain:
+            self.learner_state.uncertain.append(text)
+        self._persist_new_flow()
+
+    def should_ask_confidence(self) -> bool:
+        """Whether the occasionally-appearing confidence question should show now."""
+        return self._ask_confidence_this_round
+
+    def feedback_pending(self) -> bool:
+        """Whether the current intervention still awaits the learner's feedback."""
+        return (
+            self._current_intervention is not None
+            and not self._intervention_feedback_given
+        )
+
+    def record_confidence_prediction(self, prediction: str) -> None:
+        """Record the learner's self-assessment before explaining."""
+        self.confidence_predictions.append(
+            {"attempt": self.validation_attempts + 1, "prediction": prediction}
+        )
+        self._ask_confidence_this_round = False
+        self._persist_new_flow()
+
+    def record_intervention_feedback(
+        self, feedback: str, *, action: str | None = None
+    ) -> None:
+        """Record what the learner thought of the latest intervention.
+
+        ``feedback`` is ``clear`` (清楚多了) or ``unclear`` (还是有点懵).
+        """
+        entry: dict[str, Any] = {
+            "action": action
+            or (
+                self._current_intervention.get("action", "")
+                if self._current_intervention
+                else ""
+            ),
+            "feedback": feedback,
+        }
+        self.intervention_feedback_list.append(entry)
+        if self.learner_state.intervention_history:
+            self.learner_state.intervention_history[-1]["feedback"] = feedback
+        else:
+            self.learner_state.intervention_history.append(dict(entry))
+        self._intervention_feedback_given = True
+        self._persist_new_flow()
+
+    def signals_payload(self) -> dict[str, Any]:
+        """Compact JSON-friend data used to persist/restore the optional signals."""
+        return {
+            "reading_signals": list(self.reading_signals),
+            "stuck_points": list(self.stuck_points),
+            "confidence": list(self.confidence_predictions),
+            "intervention_feedback": list(self.intervention_feedback_list),
+        }
+
+    def restore_signals(self, payload: dict[str, Any] | None) -> None:
+        """Hydrate the optional signals from a previously persisted payload."""
+        if not payload:
+            return
+        self.reading_signals = [
+            dict(x) for x in payload.get("reading_signals") or []
+        ]
+        self.stuck_points = [str(x) for x in payload.get("stuck_points") or []]
+        self.confidence_predictions = [
+            dict(x) for x in payload.get("confidence") or []
+        ]
+        self.intervention_feedback_list = [
+            dict(x) for x in payload.get("intervention_feedback") or []
+        ]
 
     def submit_validation(self, answer: str) -> dict[str, Any]:
         """Analyse the learner's closed-book answer into a Learner State.
@@ -414,10 +526,15 @@ class LearningSession:
           "intervention" (or finish if no valuable intervention remains).
         """
         cid = self._require_started()
+        print(f"[RecallOS][submit_validation] 被调用 cid={cid} stage={self.stage!r} answer_len={len(answer)}", flush=True)
         if self.stage != "validation":
             raise SessionError("submit_validation can only be called during validation")
 
         analysis = self._analyze_learner(answer)
+        print(f"[RecallOS][submit_validation] JSON解析成功 level={analysis.understanding_level!r} understood={analysis.understood} uncertain={analysis.uncertain} misconceptions={analysis.misconceptions}", flush=True)
+        # 元认知校准：把这次的实际理解层级回填到最近一次信心预测上
+        if self.confidence_predictions:
+            self.confidence_predictions[-1]["actual_level"] = analysis.understanding_level
         self.validation_history.append(
             {
                 "answer": answer,
@@ -692,6 +809,14 @@ class LearningSession:
         if not intervention.get("requires_user_response", True):
             return self._finish_new_flow(intervention)
         self._current_intervention = intervention
+        self._intervention_feedback_given = False  # 新一轮干预：先收集反馈
+        self.learner_state.intervention_history.append(
+            {
+                "action": intervention.get("action", ""),
+                "reason": intervention.get("reason", ""),
+                "feedback": "",
+            }
+        )
         self.stage = "intervention"
         self._persist_new_flow()
         return {
@@ -702,6 +827,15 @@ class LearningSession:
     # ------------------------------------------------------------- v2 internals
 
     def _analyze_learner(self, answer: str) -> LearnerStateAnalysis:
+        # 卡住点在进入分析前先落入 uncertain，并一并喂给分析器，避免被覆盖丢失
+        for sp in self.stuck_points:
+            if sp not in self.learner_state.uncertain:
+                self.learner_state.uncertain.append(sp)
+        last_confidence = (
+            self.confidence_predictions[-1]["prediction"]
+            if self.confidence_predictions
+            else ""
+        )
         reply = self._chat_or_raise(
             learner_state_analyzer_prompt(
                 source_text=self.source_text,
@@ -709,12 +843,19 @@ class LearningSession:
                 task=self.validation_task or "用自己的话解释这个概念",
                 user_answer=answer,
                 context=self._format_learner_context(),
+                learning_goal=self.learning_goal,
+                stuck_points="\n".join(self.stuck_points),
+                confidence_prediction=str(last_confidence),
             ),
             JUDGE_TEMPERATURE,
             "分析学习者状态",
         )
+        print(f"[RecallOS][_analyze_learner] AI原始回复(前500字符)：{reply[:500]!r}", flush=True)
         analysis = self._parse_or_raise(reply, LearnerStateAnalysis, "学习者状态分析")
         self.learner_state.update_from_analysis(analysis.model_dump())
+        for sp in self.stuck_points:  # 保留用户自述的卡住点
+            if sp not in self.learner_state.uncertain:
+                self.learner_state.uncertain.append(sp)
         return analysis
 
     def _update_learner(self, answer: str) -> LearnerStateUpdate:
@@ -730,6 +871,7 @@ class LearningSession:
                     self.learner_state.to_dict(), ensure_ascii=False
                 ),
                 context=self._format_learner_context(),
+                learning_goal=self.learning_goal,
             ),
             JUDGE_TEMPERATURE,
             "更新学习者状态",
@@ -751,6 +893,14 @@ class LearningSession:
                 current_target=self.validation_task or "用自己的话解释这个概念",
                 mode=mode,
                 context=self._format_learner_context(),
+                intervention_history=json.dumps(
+                    [
+                        {k: h.get(k) for k in ("action", "feedback")}
+                        for h in self.learner_state.intervention_history
+                        if h.get("feedback")
+                    ],
+                    ensure_ascii=False,
+                ),
             ),
             QUESTION_TEMPERATURE,
             "决定最小干预",
@@ -888,6 +1038,21 @@ class LearningSession:
                 else None
             ),
             deeper_index=self.current_deeper_index,
+            learning_goal=self.learning_goal,
+            intervention_feedback=(
+                json.dumps(self.intervention_feedback_list, ensure_ascii=False)
+                if self.intervention_feedback_list
+                else None
+            ),
+            signals=(
+                json.dumps(self.signals_payload(), ensure_ascii=False)
+                if (
+                    self.reading_signals
+                    or self.stuck_points
+                    or self.confidence_predictions
+                )
+                else None
+            ),
         )
 
     def _require_started(self) -> int:
@@ -1035,6 +1200,17 @@ def _load_json_list(raw: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _load_json_dict(raw: Any) -> dict[str, Any]:
+    """Parse a JSON-object column value; return {} for empty/invalid content."""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def restore_session(
     concept_id: int, *, client: DeepSeekClient | None = None
 ) -> LearningSession:
@@ -1055,6 +1231,15 @@ def restore_session(
         client=client,
     )
     session.concept_id = concept_id
+    session.learning_goal = (
+        concept.get("learning_goal")
+        if concept.get("learning_goal") in LEARNING_GOALS
+        else "understand"
+    )
+    feedback_payload = _load_json_list(concept.get("intervention_feedback"))
+    if feedback_payload:
+        session.intervention_feedback_list = [dict(x) for x in feedback_payload]
+    session.restore_signals(_load_json_dict(concept.get("signals")))
 
     # 通用部分：重建旧流程追问历史（新流程里同样作为补充上下文）
     history = get_qa_history(concept_id)
@@ -1100,6 +1285,7 @@ def restore_session(
                     snapshot = entry
                     break
         session.learner_state = LearnerState.from_dict(snapshot)
+        session.learner_state.learning_goal = session.learning_goal
         if session.stage == "complete":
             session.phase = "connections"
         elif session.stage == "intervention":
