@@ -62,6 +62,9 @@ logs/
 # Ollama local models
 .ollama/
 
+# Cloudflare Wrangler
+.wrangler/
+
 # PyInstaller
 *.spec
 !launcher.spec
