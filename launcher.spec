@@ -2,12 +2,11 @@
 """RecallOS 桌面版 PyInstaller 打包配置（Windows，--onefile）。
 
 构建（在项目根目录运行）：
-    venv\\Scripts\\python.exe -m PyInstaller packaging\\RecallOS.spec --clean --noconfirm
+    venv\\Scripts\\python.exe -m PyInstaller launcher.spec --clean --noconfirm
 
-产物：dist\\RecallOS.exe（onefile + windowed）。
+产物：dist\\launcher.exe（onefile + windowed）。
 
 说明：
-- 与根目录 launcher.spec 逻辑完全一致，仅产物名不同（RecallOS.exe vs launcher.exe）。
 - 本 spec 的结构（EXE 直接带上 a.binaries / a.datas，且无 COLLECT）即
   PyInstaller 的 --onefile 模式，构建时无需再加 --onefile。
 - 修复过的两个经典坑：
@@ -17,6 +16,7 @@
   2) app.py 是运行时才被 launcher 启动的数据文件，core 等模块不会被
      静态分析到，需 collect_submodules("core") 显式收集。
 """
+
 from pathlib import Path
 
 from PyInstaller.building.datastruct import Tree
@@ -26,7 +26,7 @@ from PyInstaller.utils.hooks import (
     copy_metadata,
 )
 
-ROOT = Path(SPECPATH).resolve().parent  # 仓库根目录（packaging/ 的上一级）
+ROOT = Path(SPECPATH).resolve()  # 本 spec 所在目录 = 仓库根目录
 
 # ---------------------------------------------------------------------------
 # 1) Streamlit：官方没有内置 PyInstaller hook，必须手动收集。
@@ -56,7 +56,7 @@ for _pkg in _METADATA_PACKAGES:
     try:
         metadata_datas += copy_metadata(_pkg)
     except Exception as _exc:  # noqa: BLE001 —— 缺某个 dist-info 不应中断构建
-        print(f"[RecallOS.spec] 未找到元数据，跳过：{_pkg}（{_exc}）")
+        print(f"[launcher.spec] 未找到元数据，跳过：{_pkg}（{_exc}）")
 
 # ---------------------------------------------------------------------------
 # 2) core：launcher.py 不直接 import 它，是运行时的 app.py 才 import，
@@ -115,7 +115,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="RecallOS",
+    name="launcher",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

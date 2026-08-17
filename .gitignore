@@ -64,4 +64,5 @@ logs/
 
 # PyInstaller
 *.spec
+!launcher.spec
 !packaging/RecallOS.spec

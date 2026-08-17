@@ -56,7 +56,7 @@ def error_body(status: int, message: str = "boom") -> httpx.Response:
 def test_missing_api_key_raises(monkeypatch) -> None:
     monkeypatch.setattr("core.config.CONFIG_FILE", Path("/nonexistent/empty-config.json"))
     with pytest.raises(DeepSeekAuthError):
-        DeepSeekClient(settings=Settings(deepseek_api_key=""))
+        DeepSeekClient(settings=Settings(deepseek_api_key="", recallos_worker_url=""))
 
 
 def test_chat_success() -> None:
