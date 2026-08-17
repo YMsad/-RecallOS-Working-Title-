@@ -265,3 +265,46 @@ def test_usage_trend_groups_by_day() -> None:
     assert trend[0]["calls"] == 2
     assert trend[0]["total_tokens"] == 40
     assert round(trend[0]["cost"], 4) == 0.003
+
+
+def test_update_concept_user_signals_columns() -> None:
+    """V0.3.1 — learning_goal / intervention_feedback / signals 三列可读写。
+    旧库迁移（ALTER TABLE ADD COLUMN）后同样可写。"""
+    cid = database.save_concept("机会成本")
+    assert database.update_concept(
+        cid,
+        learning_goal="apply",
+        intervention_feedback='[{"action": "hint", "feedback": "clear"}]',
+        signals='{"reading_signals": []}',
+    )
+    row = database.get_concept(cid)
+    assert row["learning_goal"] == "apply"
+    assert row["intervention_feedback"] == '[{"action": "hint", "feedback": "clear"}]'
+    assert row["signals"] == '{"reading_signals": []}'
+
+    # None 参数不覆盖已写值；合法值才会写入
+    database.update_concept(cid, mastery=database.MASTERY_UNDERSTOOD)
+    row = database.get_concept(cid)
+    assert row["learning_goal"] == "apply"
+
+
+def test_migration_adds_user_signal_columns(tmp_path) -> None:
+    """模拟 V0.3.0 老库（无三列）→ init_db 迁移后自动补齐。"""
+    legacy = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute(
+            "CREATE TABLE concepts (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "title TEXT NOT NULL, source_text TEXT, mastery TEXT, "
+            "question_level INTEGER NOT NULL DEFAULT 1, "
+            "user_definition TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+    database.configure(legacy)  # 切换 DB_PATH 并触发 init_db 迁移
+    assert database.DB_PATH == legacy
+    with sqlite3.connect(legacy) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(concepts)").fetchall()}
+    assert {"learning_goal", "intervention_feedback", "signals"} <= cols
+
+    cid = database.save_concept("沉没成本")
+    database.update_concept(cid, signals="{}")
+    assert database.get_concept(cid)["signals"] == "{}"

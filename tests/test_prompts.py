@@ -6,18 +6,37 @@ import pytest
 from pydantic import ValidationError
 
 from core import (
+    DEEPER_QUESTION_ORDER,
     SYSTEM_PROMPT,
     CheckAnswerResult,
     ConnectionSuggestion,
+    DeepeningOffer,
+    Intervention,
+    LearnerStateAnalysis,
+    LearnerStateUpdate,
     SummaryResult,
+    TextTypeResult,
+    ValidationTask,
+    _legacy_deeper_question_prompt,
+    _legacy_validate_answer_prompt,
     build_messages,
     check_answer_prompt,
     connections_prompt,
+    deepening_offer_prompt,
+    detect_text_type_prompt,
+    deepening_question_prompt,
+    DEEPENING_LEVEL_GUIDES,
+    intervention_decider_prompt,
+    learner_state_analyzer_prompt,
+    learner_state_updater_prompt,
     parse_json_response,
     question_prompt,
+    simplify_explanation_prompt,
     summary_prompt,
     validate_response,
     validate_response_list,
+    validation_feedback_prompt,
+    validation_task_prompt,
     warmup_prompt,
 )
 
@@ -200,3 +219,375 @@ def test_summary_result_model() -> None:
         tomorrow_hook="边际效用和机会成本有什么关系？",
     )
     assert result.tomorrow_hook.startswith("边际效用")
+
+
+# --------------------------------------------------------- V0.3.0 new prompts
+
+
+def test_detect_text_type_prompt_requests_json() -> None:
+    prompt = detect_text_type_prompt(raw_text="机会成本是指在决策中放弃的次优选择")
+    assert "粘贴的材料原文" in prompt
+    assert "text_type" in prompt
+    assert "title_hint" in prompt
+    assert '"reason"' in prompt
+
+
+def test_detect_text_type_result_validates() -> None:
+    result = validate_response(
+        '{"text_type": "concept", "title_hint": "机会成本", "reason": null}',
+        TextTypeResult,
+    )
+    assert result.text_type == "concept"
+    assert result.title_hint == "机会成本"
+    assert result.reason is None
+
+
+def test_validation_task_prompt_requests_json() -> None:
+    prompt = validation_task_prompt(source_text="S", concept="机会成本")
+    assert "验证任务" in prompt or "验证" in prompt
+    assert '"task"' in prompt
+    assert '"type"' in prompt
+    assert '"difficulty"' in prompt
+    assert "机会成本" in prompt
+
+
+def test_validation_task_prompt_uses_text_type() -> None:
+    prompt = validation_task_prompt(source_text="S", concept="机会成本", text_type="concept")
+    assert "concept" in prompt
+    assert "text_type" in prompt
+
+
+def test_validation_task_validates() -> None:
+    result = validate_response(
+        '{"task": "用自己的话解释", "type": "summary", "difficulty": 2}',
+        ValidationTask,
+    )
+    assert result.task == "用自己的话解释"
+    assert result.type == "summary"
+    assert result.difficulty == 2
+
+
+def test_validation_task_difficulty_bounds() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        validate_response(
+            '{"task": "T", "type": "summary", "difficulty": 5}', ValidationTask
+        )
+
+
+def test_legacy_validate_answer_prompt_requests_json() -> None:
+    prompt = _legacy_validate_answer_prompt(
+        title="机会成本", task="用一句话解释", target="关键点", answer="回答"
+    )
+    assert "验证任务" in prompt
+    assert "is_correct" in prompt
+    assert '"missing"' in prompt
+
+
+def test_legacy_validation_task_prompt_requests_json() -> None:
+    from core import _legacy_validation_task_prompt
+
+    prompt = _legacy_validation_task_prompt(title="机会成本", source_text="S", qa_history="H")
+    assert "验证任务" in prompt
+    assert '"task"' in prompt
+    assert '"target"' in prompt
+
+
+def test_learner_state_analyzer_prompt_requests_json() -> None:
+    prompt = learner_state_analyzer_prompt(
+        source_text="S", concept="机会成本", task="T", user_answer="A"
+    )
+    assert "学习者状态分析器" in prompt
+    assert '"understanding_level"' in prompt
+    assert '"understood"' in prompt
+    assert '"uncertain"' in prompt
+    assert '"misconceptions"' in prompt
+    assert '"last_response_quality"' in prompt
+
+
+def test_learner_state_analyzer_prompt_includes_context_when_given() -> None:
+    prompt = learner_state_analyzer_prompt(
+        source_text="S", concept="机会成本", task="T", user_answer="A", context="此前对话"
+    )
+    assert "此前对话" in prompt
+
+
+def test_analyzer_prompt_includes_user_signals() -> None:
+    """V0.3.1 — 分析器携带学习目标 / 卡住点 / 信心预测。"""
+    prompt = learner_state_analyzer_prompt(
+        source_text="S",
+        concept="机会成本",
+        task="T",
+        user_answer="A",
+        learning_goal="apply",
+        stuck_points="机会成本只算最优那一个吗",
+        confidence_prediction="😊 应该可以讲清楚",
+    )
+    assert "能实际应用" in prompt  # apply 的目标提示
+    assert "机会成本只算最优那一个吗" in prompt
+    assert "😊 应该可以讲清楚" in prompt
+
+    plain = learner_state_analyzer_prompt(
+        source_text="S", concept="X", task="T", user_answer="A"
+    )
+    assert "能实际应用" not in plain  # 默认 understand，不给 apply 目标
+    assert "目标：理解概念本身" in plain
+
+
+def test_validation_feedback_prompt_is_concrete_and_contrastive() -> None:
+    """V0.3.1 hotfix — 反馈必须是具体、有对比、可行动的，禁止只说「理解不到位」。"""
+    prompt = validation_feedback_prompt(
+        concept_title="机会成本",
+        user_answer="它可以帮助决策",
+        task_description="用自己的话解释机会成本",
+        reading_answers=[
+            {"paragraph_index": 0, "answer": "机会成本是放弃的选项"}
+        ],
+    )
+    assert "苏格拉底式导师" in prompt
+    assert "机会成本" in prompt
+    assert "它可以帮助决策" in prompt
+    assert "机会成本是放弃的选项" in prompt  # 阅读答案进上下文
+    # 结构强制项：对比 / 例子 / 为什么
+    assert "你的回答提到了" in prompt
+    assert "但机会成本的核心在于" in prompt
+    assert "对比" in prompt
+    assert "试着想想这个例子" in prompt
+    assert "总结用户的理解程度" in prompt
+    assert "不要只说「理解不到位」" in prompt
+
+
+def test_validation_feedback_prompt_optional_reading_answers() -> None:
+    prompt = validation_feedback_prompt(
+        concept_title="复利",
+        user_answer="利滚利",
+        task_description="解释复利",
+    )
+    assert "用户的回答" in prompt and "利滚利" in prompt
+    assert "阅读时的理解" not in prompt  # 没有阅读答案时省略
+
+
+def test_intervention_decider_prompt_includes_feedback_history() -> None:
+    """V0.3.1 — 决策器收到过往干预反馈。"""
+    prompt = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        intervention_history='[{"action": "counterexample", "feedback": "unclear"}]',
+    )
+    assert "用户对已给干预的反馈" in prompt
+    assert '"action": "counterexample"' in prompt
+    assert "unclear" in prompt
+
+    plain = intervention_decider_prompt(
+        source_text="S", concept="X", learner_state="{}"
+    )
+    assert "用户对已给干预的反馈" not in plain
+
+
+def test_intervention_decider_forces_intensity_ladder() -> None:
+    """V0.3.0 patch 3 — 决策器 prompt 内置从低到高的强制干预阶梯。"""
+    prompt = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}"
+    )
+    assert "hint（一句话提示）→ example（具体例子）→ analogy（类比）→ counterexample（反例）→ question（直接提问）" in prompt
+    assert "只有当更低优先级的干预无效时，才能使用更高优先级的干预" in prompt
+    assert "上次干预未让用户进步" not in prompt  # 无最低级别时不加约束
+
+    escalated = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        minimum_action="example",
+    )
+    assert "上次干预未让用户进步" in escalated
+    assert "example（具体例子）" in escalated
+    assert "从这一级起步" in escalated
+
+
+def test_intervention_decider_grades_question_by_answer_richness() -> None:
+    """V0.3.1 hotfix — 决策器收到用户回答的丰富度，追问必须匹配对应层级。"""
+    prompt = intervention_decider_prompt(
+        source_text="S",
+        concept="机会成本",
+        learner_state="{}",
+        answer_richness="rich",
+    )
+    assert "丰富度" in prompt
+    assert "rich" in prompt
+    assert "反事实" in prompt  # rich → 反事实「如果没有它会怎样？」
+    assert "如果没有这个概念" in prompt
+
+    simple = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}", answer_richness="simple"
+    )
+    assert "生活类比" in simple
+    assert "这就像什么" in simple
+
+    plain = intervention_decider_prompt(
+        source_text="S", concept="X", learner_state="{}"
+    )
+    assert "丰富度" not in plain  # 未提供时不干扰默认决策
+
+
+def test_deepening_question_prompt_grades_by_level() -> None:
+    """V0.3.1 hotfix — deepening_question_prompt 按丰富度给出对应层次的追问模板。"""
+    simple = deepening_question_prompt(level="simple", concept="机会成本", source_text="原文")
+    assert "这就像什么" in simple
+    assert "生活类比" in simple
+
+    moderate = deepening_question_prompt(level="moderate", concept="机会成本", source_text="原文")
+    assert "和什么有关" in moderate
+    assert DEEPENING_LEVEL_GUIDES["moderate"] in moderate
+
+    rich = deepening_question_prompt(
+        level="rich", concept="机会成本", source_text="原文", qa_history="Q1→A1"
+    )
+    assert "如果没有这个概念" in rich
+    assert "Q1→A1" in rich  # 历史回答进上下文
+
+    with pytest.raises(ValueError):
+        deepening_question_prompt(level="unknown", concept="X", source_text="Y")
+
+
+def test_learner_state_analysis_validates() -> None:
+    result = validate_response(
+        '{"understanding_level": "relationship", "understood": ["理解了关系"], '
+        '"uncertain": [], "misconceptions": [], "last_response_quality": "partial"}',
+        LearnerStateAnalysis,
+    )
+    assert result.understanding_level == "relationship"
+    assert result.understood == ["理解了关系"]
+
+
+def test_intervention_decider_prompt_requests_json() -> None:
+    prompt = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}"
+    )
+    assert "最小干预决策器" in prompt
+    assert '"action"' in prompt
+    assert '"content"' in prompt
+    assert '"requires_user_response"' in prompt
+    assert "验证阶段" in prompt
+    deepening = intervention_decider_prompt(
+        source_text="S", concept="机会成本", learner_state="{}", mode="deepening"
+    )
+    assert "深入阶段" in deepening
+
+
+def test_intervention_validates() -> None:
+    result = validate_response(
+        '{"action": "counterexample", "reason": "边界不清", '
+        '"content": "如果放弃三个选择，机会成本是三个加起来吗？", '
+        '"requires_user_response": true}',
+        Intervention,
+    )
+    assert result.action == "counterexample"
+    assert result.content.startswith("如果放弃")
+
+
+def test_learner_state_updater_prompt_requests_json() -> None:
+    prompt = learner_state_updater_prompt(
+        source_text="S", concept="机会成本", intervention="提示",
+        user_answer="A", learner_state="{}"
+    )
+    assert "学习状态更新器" in prompt
+    assert '"next_best_action"' in prompt
+    assert '"understanding_level"' in prompt
+
+
+def test_learner_state_updater_prompt_includes_goal() -> None:
+    """V0.3.1 — 更新器携带学习目标，作为达标判定尺度。"""
+    prompt = learner_state_updater_prompt(
+        source_text="S", concept="机会成本", intervention="提示",
+        user_answer="A", learner_state="{}", learning_goal="exam",
+    )
+    assert "为考试掌握" in prompt
+    assert "术语准确" in prompt
+    default = learner_state_updater_prompt(
+        source_text="S", concept="机会成本", intervention="提示",
+        user_answer="A", learner_state="{}",
+    )
+    assert "为考试掌握" not in default
+
+
+def test_learner_state_update_validates() -> None:
+    result = validate_response(
+        '{"understanding_level": "application", "understood": ["能用"], '
+        '"uncertain": [], "misconceptions": [], "last_response_quality": "deep", '
+        '"next_best_action": "none"}',
+        LearnerStateUpdate,
+    )
+    assert result.understanding_level == "application"
+    assert result.next_best_action == "none"
+
+
+def test_deepening_offer_prompt_requests_json() -> None:
+    prompt = deepening_offer_prompt(concept="机会成本", understanding_level="relationship")
+    assert "学习教练" in prompt
+    assert "机会成本" in prompt
+    assert '"offer"' in prompt
+    assert '"options"' in prompt
+
+
+def test_deepening_offer_validates() -> None:
+    result = validate_response(
+        '{"offer": "你已经抓住核心，要不要再挖一层？", "options": ["深入", "先到这里"]}',
+        DeepeningOffer,
+    )
+    assert result.offer == "你已经抓住核心，要不要再挖一层？"
+    assert result.options == ["深入", "先到这里"]
+
+
+def test_simplify_explanation_prompt_is_plain_text() -> None:
+    prompt = simplify_explanation_prompt(
+        title="机会成本", source_text="S", explanation="旧解释有点绕"
+    )
+    assert "更简单" in prompt or "降一个台阶" in prompt
+    assert "旧解释有点绕" in prompt
+    assert '{"' not in prompt
+
+
+@pytest.mark.parametrize(
+    ("qtype", "marker"),
+    [
+        ("verification_plus", "再验证"),
+        ("connection", "联系"),
+        ("counterfactual", "反事实"),
+        ("action", "行动"),
+        ("first_principles", "第一性原理"),
+    ],
+)
+def test_legacy_deeper_question_prompt_all_types(qtype: str, marker: str) -> None:
+    prompt = _legacy_deeper_question_prompt(
+        title="机会成本", source_text="S", question_type=qtype
+    )
+    assert marker in prompt
+    assert "深化" in prompt
+    assert '{"' not in prompt
+
+
+def test_legacy_deeper_question_prompt_includes_qa_history_when_given() -> None:
+    prompt = _legacy_deeper_question_prompt(
+        title="机会成本",
+        source_text="S",
+        question_type="connection",
+        qa_history="回答记录",
+    )
+    assert "回答记录" in prompt
+
+
+def test_legacy_deeper_question_prompt_invalid_type_rejected() -> None:
+    with pytest.raises(ValueError):
+        _legacy_deeper_question_prompt(title="X", source_text="Y", question_type="nope")
+
+
+def test_deeper_question_order_matches_spec() -> None:
+    assert DEEPER_QUESTION_ORDER == (
+        "verification_plus",
+        "connection",
+        "counterfactual",
+        "action",
+        "first_principles",
+    )

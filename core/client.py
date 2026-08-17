@@ -73,25 +73,55 @@ class DeepSeekClient:
         settings: Settings | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
+        key_manager: Any = None,
         **overrides: Any,
     ) -> None:
         self.settings = (settings or get_settings()).model_copy(update=overrides)
-        if not self.settings.deepseek_api_key:
+        self._api_key = self._resolve_api_key(key_manager)
+        if not self._api_key:
             raise DeepSeekAuthError(
                 "DEEPSEEK_API_KEY is not set. Copy .env.example to .env and fill in your key."
             )
         self._client = httpx.Client(
             base_url=self.settings.deepseek_base_url.rstrip("/"),
             headers={
-                "Authorization": f"Bearer {self.settings.deepseek_api_key}",
+                "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
             timeout=httpx.Timeout(self.settings.request_timeout),
             transport=transport,
         )
+        logger.info(
+            "DeepSeekClient ready: base=%s model=%s timeout=%.0fs max_retries=%d",
+            self.settings.deepseek_base_url,
+            self.settings.deepseek_model,
+            self.settings.request_timeout,
+            self.settings.max_retries,
+        )
         self.usage_records: list[dict[str, Any]] = []
         self.total_usage: dict[str, int] = {}
         self.request_count = 0
+
+    def _resolve_api_key(self, key_manager: Any = None) -> str:
+        """V1.0 — Worker 优先取临时 Key，失败回退手动 Key。
+
+        配置了 ``RECALLOS_WORKER_URL`` 时先走 Cloudflare Worker 分发
+        （24h 临时 Key，绑定设备指纹）；Worker 不可用 / 每日限额用尽 /
+        离线时回退到 ``settings.deepseek_api_key``。未配置 Worker 则
+        直接走原有「手动 Key」路径（行为与历史版本完全一致）。
+        """
+        from core.key_manager import DailyLimitExceeded, KeyManager, KeyManagerError
+
+        if self.settings.recallos_worker_url:
+            km = key_manager or KeyManager(worker_url=self.settings.recallos_worker_url)
+            try:
+                key = km.get_api_key()
+                if key:
+                    logger.info("使用 Worker 分发的临时 Key")
+                    return key
+            except (KeyManagerError, DailyLimitExceeded) as exc:
+                logger.warning("Worker Key 分发失败，回退手动 Key：%s", exc)
+        return self.settings.deepseek_api_key
 
     def close(self) -> None:
         self._client.close()
@@ -147,6 +177,14 @@ class DeepSeekClient:
 
         last_error: DeepSeekError | None = None
         for attempt in range(1, self.settings.max_retries + 1):
+            logger.info(
+                "AI 请求: model=%s messages=%d max_tokens=%s（第 %d/%d 次）",
+                payload["model"],
+                len(messages),
+                max_tokens,
+                attempt,
+                self.settings.max_retries,
+            )
             try:
                 body = self._post("/chat/completions", payload)
                 self.request_count += 1
@@ -218,8 +256,12 @@ class DeepSeekClient:
         try:
             response = self._client.post(path, json=payload)
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "DeepSeek 请求超时（超过 %.0fs）: %s", self.settings.request_timeout, exc
+            )
             raise DeepSeekNetworkError(f"Request timed out: {exc}") from exc
         except httpx.TransportError as exc:
+            logger.warning("DeepSeek 网络错误: %s", exc)
             raise DeepSeekNetworkError(f"Network error: {exc}") from exc
 
         status = response.status_code

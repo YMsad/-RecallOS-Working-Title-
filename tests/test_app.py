@@ -8,6 +8,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from core import database
+from core.client import DeepSeekNetworkError
 
 APP = "app.py"
 
@@ -19,6 +20,31 @@ class FakeClient:
         self.questions = list(questions)
         self.related = list(related)
         self.i = 0
+        self.depth = 0
+        # V0.3.0 Learning Loop v2 固定回复
+        self.task_reply = {"task": "用一句话向朋友解释机会成本", "type": "summary", "difficulty": 2}
+        self.analysis_reply = {
+            "understanding_level": "relationship",
+            "understood": ["理解了核心含义"],
+            "uncertain": [],
+            "misconceptions": [],
+            "last_response_quality": "deep",
+        }
+        self.decider_reply = {
+            "action": "hint",
+            "reason": "",
+            "content": "机会成本里的“成本”指的是什么？",
+            "requires_user_response": True,
+        }
+        self.update_reply = {
+            "understanding_level": "relationship",
+            "understood": ["理解了核心含义"],
+            "uncertain": [],
+            "misconceptions": [],
+            "last_response_quality": "deep",
+            "next_best_action": "none",
+        }
+        self.offer_reply = {"offer": "要不要再挖一层？", "options": ["深入", "先到这里"]}
 
     def __enter__(self) -> "FakeClient":
         return self
@@ -61,7 +87,61 @@ class FakeClient:
             return f"开场问题{self.i + 1}"
         if "层追问" in user:
             return f"问题{self.i + 1}"
+        if "讲得不够简单" in user:
+            return "更简单的大白话：机会成本就是你为了A而放弃的B。"
+        if "层深化" in user:
+            self.depth += 1
+            return f"深化问题{self.depth}"
+        # ---- V0.3.0 Learning Loop v2 — prompt 分支 ----
+        if "学习任务设计器" in user:
+            return json.dumps(self.task_reply, ensure_ascii=False)
+        if "学习者状态分析器" in user:
+            return json.dumps(self.analysis_reply, ensure_ascii=False)
+        if "苏格拉底式导师" in user:
+            return "**你的回答提到了：**\n- 决策\n\n**但机会成本的核心在于：**\n放弃的最佳替代\n\n**试着想想这个例子：**\n买电影票\n\n**所以：**\n方向对但需要调整"
+        if "最小干预决策器" in user:
+            return json.dumps(self.decider_reply, ensure_ascii=False)
+        if "学习状态更新器" in user:
+            return json.dumps(self.update_reply, ensure_ascii=False)
+        if "学习教练" in user:
+            return json.dumps(self.offer_reply, ensure_ascii=False)
         raise AssertionError(f"unexpected prompt: {user[:40]}")
+
+
+class FlakyClient(FakeClient):
+    """FakeClient that can simulate AI timeout/network failures on demand."""
+
+    def __init__(self, questions, *, fail_task: int = 0, fail_analyze: int = 0,
+                 fail_decide: int = 0, fail_offer: int = 0) -> None:
+        super().__init__(questions)
+        self.fail_task = fail_task
+        self.fail_analyze = fail_analyze
+        self.fail_decide = fail_decide
+        self.fail_offer = fail_offer
+        self._task_calls = 0
+        self._analyze_calls = 0
+        self._decide_calls = 0
+        self._offer_calls = 0
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "学习任务设计器" in user:
+            self._task_calls += 1
+            if self._task_calls <= self.fail_task:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        if "学习者状态分析器" in user:
+            self._analyze_calls += 1
+            if self._analyze_calls <= self.fail_analyze:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        if "最小干预决策器" in user:
+            self._decide_calls += 1
+            if self._decide_calls <= self.fail_decide:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        if "学习教练" in user:
+            self._offer_calls += 1
+            if self._offer_calls <= self.fail_offer:
+                raise DeepSeekNetworkError("Request timed out: 模拟超时")
+        return super().chat(messages, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +159,14 @@ def configured_app(monkeypatch, tmp_path):
     from core import config
 
     config.reset_settings_cache()
+    yield
+
+
+@pytest.fixture
+def legacy_flow(monkeypatch):
+    """V0.3.0 — 固定旧流程（RECALLOS_NEW_FLOW=0），让旧四层追问测试保持原样。
+    AppTest 会以新脚本进程执行 app.py，必须通过环境变量而不是模块属性来切换。"""
+    monkeypatch.setenv("RECALLOS_NEW_FLOW", "0")
     yield
 
 
@@ -143,7 +231,7 @@ def test_app_save_key_returns_to_home(monkeypatch, tmp_path) -> None:
     assert config.get_api_key_from_config() == "sk-app-saved"
 
 
-def test_app_full_flow(monkeypatch, configured_app) -> None:
+def test_app_full_flow(monkeypatch, configured_app, legacy_flow) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=30).run()
 
@@ -187,16 +275,20 @@ def test_app_history_view(monkeypatch, configured_app) -> None:
     assert not at.exception
     assert current_step(at) == "history"
     assert "机会成本" in markdown_text(at)
+    # 表格按行展示掌握度标签与表头
+    assert "✅ 搞懂了" in markdown_text(at)
+    assert "概念名称" in markdown_text(at)
+    assert "操作" in markdown_text(at)
 
 
-def test_app_mode_toggle_on_home(configured_app) -> None:
+def test_app_mode_toggle_on_home(configured_app, legacy_flow) -> None:
+    """V0.3.1 — 模式切换已彻底移除：即使旧流程下首页也不再显示「有基础」切换。"""
     at = AppTest.from_file(APP, default_timeout=15).run()
     assert not at.exception
-    assert len(at.toggle) == 1
-    assert "有基础" in at.toggle[0].label
+    assert len(at.toggle) == 0
 
 
-def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app) -> None:
+def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app, legacy_flow) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -208,7 +300,7 @@ def test_app_learning_flow_uses_dynamic_opening(monkeypatch, configured_app) -> 
     assert "开场问题" in markdown_text(at)
 
 
-def test_app_explain_button(monkeypatch, configured_app) -> None:
+def test_app_explain_button(monkeypatch, configured_app, legacy_flow) -> None:
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=15).run()
     at.text_input[0].input("机会成本")
@@ -219,7 +311,7 @@ def test_app_explain_button(monkeypatch, configured_app) -> None:
     assert "我换个说法" in markdown_text(at)
 
 
-def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app) -> None:
+def test_app_single_assistant_bubble_per_answer(monkeypatch, configured_app, legacy_flow) -> None:
     """每个回答只产生一个 AI 气泡（反馈与下一问合并），不会出现两个气泡。"""
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient(make_questions(4)))
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -250,7 +342,7 @@ def test_app_warmup_button_shows_prewarm_text(monkeypatch, configured_app) -> No
     )
 
 
-def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app) -> None:
+def test_app_warmup_prepended_to_first_message(monkeypatch, configured_app, legacy_flow) -> None:
     fake = FakeClient(make_questions(4))
     monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=15).run()
@@ -468,3 +560,970 @@ def test_app_delete_concept_flow(configured_app) -> None:
     assert database.get_concept(cid) is None
     assert database.get_qa_history(cid) == []
     assert any("还没有学习记录" in (i.value or "") for i in at.info)
+
+
+def test_app_delete_from_table(configured_app) -> None:
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.save_qa(b, "Q?", "A", True)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 表格按行展示掌握度标签（搞懂了 / 学习中），无「模糊」行
+    assert "✅ 搞懂了" in markdown_text(at)
+    assert "📖 学习中" in markdown_text(at)
+    assert "🔄 模糊" not in markdown_text(at)
+    # 行内「查看」按钮切换详情选中
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert "history_view_id" in at.session_state
+    assert at.session_state["history_view_id"] == b
+    assert "沉没成本" in markdown_text(at)
+    # 行内「✕」两步确认删除概念 A，删除后列表自动刷新
+    at = at.button(key=f"xdel_{a}").click().run()
+    assert not at.exception
+    assert any("确认删除" in (btn.label or "") for btn in at.button)
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert database.get_concept(a) is None
+    assert database.get_concept(b) is not None
+    assert "机会成本" not in markdown_text(at)
+    assert "📖 学习中" in markdown_text(at)
+
+
+def test_app_history_view_and_delete_buttons_via_callback(configured_app) -> None:
+    """查看 / ✕ / 确认删除 全部走 on_click 回调：同组多概念时切换与删除即时生效。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.update_concept(b, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 点「查看」切换到 b，详情随之更新
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+    # 点「✕」弹出确认框，但数据暂未删除
+    at = at.button(key=f"xdel_{a}").click().run()
+    assert not at.exception
+    assert any("确认删除" in (btn.label or "") for btn in at.button)
+    assert database.get_concept(a) is not None
+    # 点「确认删除」→ 回调删除并刷新列表，详情切回剩余概念
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert database.get_concept(a) is None
+    assert database.get_concept(b) is not None
+    assert "机会成本" not in markdown_text(at)
+    assert "沉没成本" in markdown_text(at)
+
+
+def test_app_delete_from_detail_page_returns_to_history(configured_app) -> None:
+    """详情页顶部辅助删除：两步确认后回到历史页，被删概念已清除。"""
+    cid_a = database.save_concept("机会成本", "原文A")
+    cid_b = database.save_concept("沉没成本", "原文B")
+    database.save_connection(cid_a, cid_b, "都关于选择")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    at = click_by_label(at, "去往")
+    assert not at.exception
+    assert current_step(at) == "concept_detail"
+    shown = at.session_state["concept_detail_id"]
+    # 详情页顶部有辅助删除入口，两步式确认
+    assert any("删除这个概念" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "删除这个概念")
+    assert not at.exception
+    assert any("确认删除" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "确认删除")
+    assert not at.exception
+    assert current_step(at) == "history"
+    assert database.get_concept(shown) is None
+
+
+def test_app_history_view_expands_inline_and_collapses(configured_app) -> None:
+    """「查看」在概念行下方行内展开详情；一次只展开一个；再次点击可收起。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    database.update_concept(b, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+    # 首次进入默认展开第一个概念，行内只渲染一个展开区（一个「关闭」按钮）
+    assert "history_view_id" in at.session_state
+    assert at.session_state["history_view_id"] in (a, b)
+    assert any("关闭" in (btn.label or "") for btn in at.button)
+    # 点击「查看」切换展开到 b（一次只展开一个）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+    assert any("关闭" in (btn.label or "") for btn in at.button)
+    # 再次点击当前展开概念的「查看」→ 收起（不会被自动重新展开）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] is None
+    assert not any("关闭" in (btn.label or "") for btn in at.button)
+    # 可再点开另一个概念
+    at = at.button(key=f"view_{a}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == a
+
+
+# ---------------------------------------------------------------- V0.3.0 UI
+
+
+def _start_new_flow(at: AppTest) -> AppTest:
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃")
+    return click_by_label(at, "开始")
+
+
+def test_app_new_flow_home_drops_mode_toggle(configured_app) -> None:
+    """新流程首页不再显示「有基础」模式切换。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert not any("有基础" in (t.label or "") for t in at.toggle)
+    assert any("概念名" in (ti.label or "") for ti in at.text_input)
+
+
+def test_app_new_flow_reading_to_validation(monkeypatch, configured_app) -> None:
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert not at.exception
+    assert current_step(at) == "learning"
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "reading"
+    assert any("阅读中" in (i.value or "") for i in at.info)
+    assert any("先读原文" in m["text"] for m in at.session_state["messages"])
+
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
+    assert any("😵 我看不懂" in (b.label or "") for b in at.button)
+
+    # 我看不懂 → 大白话解释，阶段不变
+    at = click_by_label(at, "我看不懂")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("更简单的大白话" in m["text"] for m in at.session_state["messages"])
+
+
+def test_app_new_flow_home_goal_selector(configured_app) -> None:
+    """V0.3.1 — 首页可选学习目标；不选默认「理解概念」；选择会落库。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert at.radio[0].value == "🧠 理解概念"
+
+    at.radio[0].set_value("🛠 能实际应用").run()
+    assert not at.exception
+    at = _start_new_flow(at)
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.learning_goal == "apply"
+    assert database.get_concept(session.concept_id)["learning_goal"] == "apply"
+
+
+def test_app_new_flow_reading_split_with_guidance(monkeypatch, configured_app) -> None:
+    """V0.3.1 修复 — 阅读拆段 + 每段引导问题：不再纯读，而是用自己的话总结一句。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert at.session_state["session"].stage == "reading"
+
+    # 拆段展示 + 每段一个引导 text_input
+    assert "第 1 段 / 共 1 段" in markdown_text(at)
+    assert any(t.key == "v_read_ans_0" for t in at.text_input)
+    assert any("这段在说什么" in (t.label or "") for t in at.text_input)
+    # 阅读信号按钮（🤔💡✓）与卡住点输入不再出现
+    assert not any(b.key and b.key.startswith("v_rs_") for b in at.button)
+    assert not any(t.key == "v_stuck_text" for t in at.text_input)
+
+    # 阅读不阻塞：仍然可以正常开始验证
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_answer_recorded(monkeypatch, configured_app) -> None:
+    """V0.3.1 修复 — 每段引导问题的回答被记录并落库 reading_answers。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    assert at.session_state["session"].stage == "reading"
+
+    at.text_input[0].input("机会成本就是选择放弃的那个代价").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.reading_answer_text(0) == "机会成本就是选择放弃的那个代价"
+    saved = json.loads(database.get_concept(session.concept_id)["reading_answers"])
+    assert saved[0]["paragraph_index"] == 0
+    assert saved[0]["answer"] == "机会成本就是选择放弃的那个代价"
+    assert any("已记录 1/1" in (c.value or "") for c in at.caption)
+
+    # 点击开始验证后 stage 前进，不受记录影响
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_no_source_skips_to_validation(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 没有原文时，阅读阶段直接提供「直接开始验证」。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+    assert any("直接开始验证" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "直接开始验证")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_pages_one_paragraph(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 阅读一次一段：进度条 + 上/下一段导航 + 我读完了，不再一次性铺开。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("机会成本")
+    at.text_area[0].input("原文：选择意味着放弃。\n\n机会成本就是被放弃的那个最好的选择。")
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    # 只显示第一段 + 进度 + 导航按钮，不渲染对话气泡
+    assert at.session_state["v_read_index"] == 0
+    assert "第 1 段 / 共 2 段" in markdown_text(at)
+    assert any(t.key == "v_read_ans_0" for t in at.text_input)
+    assert len(at.chat_message) == 0
+    assert any("上一段" in (b.label or "") for b in at.button)
+    assert any("下一段" in (b.label or "") for b in at.button)
+
+    # 记下第一段理解后切到第二段
+    at.text_input[0].input("第一段总结").run()
+    assert not at.exception
+    at = click_by_label(at, "下一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 1
+    assert "第 2 段 / 共 2 段" in markdown_text(at)
+    assert any(t.key == "v_read_ans_1" for t in at.text_input)
+    assert at.session_state["session"].reading_answer_text(0) == "第一段总结"
+
+    # 能回退，且每段回答被记录到对应段
+    at = click_by_label(at, "上一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 0
+    at.text_input[0].input("第一段总结(修订)").run()
+    assert at.session_state["session"].reading_answer_text(0) == "第一段总结(修订)"
+
+    # 读完开始验证
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+
+
+def test_app_new_flow_reading_show_keys_collapses_paragraph(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 阅读「📋 只看重点」：打开后只显示关键句，原文收进展开面板。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at.text_input[0].input("自定义概念")
+    at.text_area[0].input(
+        "第一句讲主干。第二句讲细节。第三句有「关键点」。第四句再补充例子。第五句最后收尾总结。"
+    )
+    at = click_by_label(at, "开始")
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    # 默认完整段落直接展示
+    assert "第五句最后收尾总结" in markdown_text(at)
+    assert not any("展开原文" in (e.label or "") for e in at.expander)
+
+    # 打开只看重 点 → 只渲染关键句（含「关键点」的句子被选中），全文收进展开面板
+    show_keys = next(t for t in at.toggle if "只看重点" in (t.label or ""))
+    at = show_keys.set_value(True).run()
+    assert not at.exception
+    md = markdown_text(at)
+    assert "第三句有" in md
+    assert "- 第一句讲主干。" in md
+    assert any("展开原文" in (e.label or "") for e in at.expander)
+
+
+def test_app_builtin_reading_bold_and_pagination(configured_app) -> None:
+    """V0.3.1 hotfix — 内置概念阅读：关键词加粗保留 + 多段一次一段导航。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = at.button(key="builtin_opportunity_cost").click().run()
+    assert not at.exception
+    assert at.session_state["session"].stage == "reading"
+
+    assert "**机会成本**" in markdown_text(at)
+    assert "第 1 段 / 共 4 段" in markdown_text(at)
+    assert any("只看重点" in (t.label or "") for t in at.toggle)
+    assert any("下一段" in (b.label or "") for b in at.button)
+
+    at = click_by_label(at, "下一段")
+    assert not at.exception
+    assert at.session_state["v_read_index"] == 1
+    assert "第 2 段 / 共 4 段" in markdown_text(at)
+
+
+def test_app_new_flow_complete_hides_chat_bubbles(monkeypatch, configured_app) -> None:
+    """V0.3.1 hotfix — 完成阶段只留成功消息+简短确认+「查看今日总结」，隐藏对话气泡。"""
+    fake = FakeClient([{"question": "Q", "correct": True, "feedback": "通过"}])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    assert at.session_state["session"].stage == "complete"
+
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    assert any("明天到点我会提醒你" in (c.value or "") for c in at.caption)
+    assert len(at.chat_message) == 0
+    assert any("查看今日总结" in (b.label or "") for b in at.button)
+
+
+def test_app_new_flow_intervention_feedback_ui(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 干预后 👍/🤔 反馈按钮可选；反馈写入 learner_state 并落库。"""
+    fake = FakeClient([])
+    fake.analysis_reply = {
+        "understanding_level": "relationship",
+        "understood": [],
+        "uncertain": ["边界不清"],
+        "misconceptions": [],
+        "last_response_quality": "partial",
+    }
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "intervention"
+    assert session.feedback_pending() is True
+
+    # 下一次干净 run 才渲染干预反馈按钮（处理回答那一 run 顶部还没到干预阶段）
+    at = at.run()
+    assert not at.exception
+    assert any("👍 清楚多了" in (b.label or "") for b in at.button)
+
+    # 提交「👍 清楚多了」反馈
+    at = click_by_label(at, "👍 清楚多了")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.intervention_feedback_list == [
+        {"action": "hint", "feedback": "clear"}
+    ]
+    assert (
+        session.learner_state.intervention_history[-1]["feedback"] == "clear"
+    )
+    assert database.get_concept(session.concept_id)["intervention_feedback"]
+
+
+def test_app_new_flow_validation_pass_goes_complete(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 验证过即完：无理解缺口直接完成，不再询问「是否深入」。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.validation_passed is True
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    # 完成通知气泡（含层级）+ 完成页
+    msgs = at.session_state["messages"]
+    assert any("你的理解已经到位" in m["text"] for m in msgs)
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    # 不再出现 offer 的深入选择按钮
+    assert not any("我想再深入一层" in (b.label or "") for b in at.button)
+    assert not any("先到这里" in (b.label or "") for b in at.button)
+
+
+def test_app_new_flow_validation_gap_enters_intervention(monkeypatch, configured_app) -> None:
+    fake = FakeClient([])
+    fake.analysis_reply = {
+        "understanding_level": "relationship",
+        "understood": [],
+        "uncertain": ["边界不清"],
+        "misconceptions": ["混淆了机会成本与沉没成本"],
+        "last_response_quality": "partial",
+    }
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.validation_passed is False
+    assert session.stage == "intervention"
+    assert any("机会成本里的“成本”指的是什么" in m["text"] for m in at.session_state["messages"])
+    assert "最小干预" in markdown_text(at)
+
+
+def test_app_new_flow_intervention_answer_stops_when_understand(monkeypatch, configured_app) -> None:
+    fake = FakeClient([])
+    fake.analysis_reply = {
+        "understanding_level": "relationship",
+        "understood": [],
+        "uncertain": ["边界不清"],
+        "misconceptions": ["混淆"],
+        "last_response_quality": "partial",
+    }
+    fake.update_reply = {
+        "understanding_level": "application",
+        "understood": ["理解了核心与边界"],
+        "uncertain": [],
+        "misconceptions": [],
+        "last_response_quality": "deep",
+        "next_best_action": "none",
+    }
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是选择").run()  # 有缺口 → 干预
+    assert not at.exception
+    assert at.session_state["session"].stage == "intervention"
+    # 回答干预 → updater 判断理解到位 → 无剩余干预 → 完成
+    at = at.chat_input[0].set_value("成本是你放弃的那个最好的选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "complete"
+    assert session.phase == "connections"
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    assert len(session.deeper_history) == 1
+    assert session.deeper_history[0]["next_best_action"] == "none"
+
+
+def test_app_new_flow_complete_goes_to_summary(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 完成即总结：验证通过后点「查看今日总结」，总结自动生成无需输入。"""
+    fake = FakeClient([])
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()  # 验证通过 → 完成
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "complete"
+
+    at = click_by_label(at, "查看今日总结")
+    assert not at.exception
+    assert current_step(at) == "summary"
+    # 自动生成：无需手动输入，总结直接出现在页面上
+    assert "summary_result" in at.session_state
+    assert "明天再想" in markdown_text(at)
+    today = database.get_today_summary()
+    assert today is not None
+    assert today["breakthrough_text"] == "我终于搞懂了机会成本"
+    assert database.get_setting("streak") == "1"
+    # 自动把最新验证回答记成「我的理解」
+    concept = database.get_concept(session.concept_id)
+    assert concept["user_definition"] == "机会成本就是放弃的次优选择"
+    assert concept["mastery"] == "搞懂了"
+
+
+class PlainSummaryClient(FakeClient):
+    """FakeClient whose summary also includes the plain one-liner."""
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "每日总结" in user:
+            return json.dumps(
+                {
+                    "breakthrough": "我终于搞懂了机会成本",
+                    "plain": "说白了就是你选了A就没了B",
+                    "tomorrow_hook": "明天再想",
+                },
+                ensure_ascii=False,
+            )
+        return super().chat(messages, **kwargs)
+
+
+def test_app_summary_shows_three_part_summary(monkeypatch, configured_app) -> None:
+    """V0.3.1 修复 — 总结页展示 breakthrough / plain（可选）/ tomorrow_hook。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: PlainSummaryClient([]))
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    at = click_by_label(at, "查看今日总结")
+    assert not at.exception
+    text = markdown_text(at)
+    assert "你搞懂了什么" in text
+    assert "说白了我就是" in text
+    assert "说白了就是你选了A就没了B" in text
+    assert "明天 AI 会问你" in text
+    assert "明天再想" in text
+
+
+def test_app_summary_auto_timeout_shows_retry(monkeypatch, configured_app) -> None:
+    """V0.3.1 — 自动总结 AI 超时：不崩，展示重试按钮，重试后恢复。"""
+    fake = FlakyClient([])
+
+    class FailingSummaryClient(FakeClient):
+        def __init__(self, inner: FakeClient) -> None:
+            super().__init__([])
+            self._inner = inner
+            self._calls = 0
+
+        def chat(self, messages, **kwargs) -> str:
+            user = messages[1]["content"]
+            if "每日总结" in user:
+                self._calls += 1
+                if self._calls == 1:
+                    raise DeepSeekNetworkError("Request timed out: 模拟超时")
+            return self._inner.chat(messages, **kwargs)
+
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FailingSummaryClient(fake))
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    at = click_by_label(at, "查看今日总结")
+    assert not at.exception
+    assert "summary_error" in at.session_state
+    assert any("重试" in (b.label or "") for b in at.button)
+    at = click_by_label(at, "重试")
+    assert not at.exception
+    assert "summary_result" in at.session_state
+
+
+def test_app_validation_timeout_retry_recovers(monkeypatch, configured_app) -> None:
+    """验证分析 AI 超时：不转圈不崩，展示 ❌ 气泡，再次提交答案即可恢复。"""
+    fake = FlakyClient([], fail_analyze=1)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "validation"  # 失败不前进
+    assert any("❌" in m["text"] for m in at.session_state["messages"] if m["text"])
+    # 再次提交同一答案 → 分析成功 → 直接完成（无缺口）
+    at = at.chat_input[0].set_value("机会成本就是放弃的次优选择").run()
+    assert not at.exception
+    assert at.session_state["session"].stage == "complete"
+
+
+class JunkTaskClient(FakeClient):
+    """FakeClient that returns non-JSON for the validation-task prompt."""
+
+    def chat(self, messages, **kwargs) -> str:
+        user = messages[1]["content"]
+        if "学习任务设计器" in user:
+            return "抱歉我这次没按格式输出"
+        return super().chat(messages, **kwargs)
+
+
+def test_app_start_validation_timeout_retryable(monkeypatch, configured_app) -> None:
+    """读完后点「开始验证」时 AI 超时：不转圈不崩，留在阅读阶段，可重试恢复。"""
+    fake = FlakyClient([], fail_task=1)
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: fake)
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "reading"  # 失败不前进，留在阅读阶段可重试
+    assert any("❌" in m["text"] for m in at.session_state["messages"] if m["text"])
+    assert any("重试" in m["text"] for m in at.session_state["messages"] if m["text"])
+    # 按钮还在 → 用户可以再点一次重试
+    assert any("我读完了" in (b.label or "") for b in at.button)
+
+    # 重试 → 第二次成功 → 进入验证阶段
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    assert at.session_state["session"].stage == "validation"
+    assert any("验证你的理解" in m["text"] for m in at.session_state["messages"])
+
+
+def test_app_start_validation_malformed_reply_friendly_error(
+    monkeypatch, configured_app
+) -> None:
+    """验证任务 AI 返回非 JSON：不抛未捕获异常，转为友好提示并可重试。"""
+    monkeypatch.setattr(
+        "core.session.DeepSeekClient", lambda: JunkTaskClient([])
+    )
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    at = _start_new_flow(at)
+    at = click_by_label(at, "我读完了")
+    assert not at.exception
+    session = at.session_state["session"]
+    assert session.stage == "reading"  # 未崩溃、未前进，仍可重试
+    assert any("格式不正确" in m["text"] for m in at.session_state["messages"] if m["text"])
+    assert any("我读完了" in (b.label or "") for b in at.button)
+
+
+# ----------------------------------------------------- V0.3.0 session resume
+
+
+def _seed_new_flow_concept(**updates) -> int:
+    """Create a concept saved in the middle of the V0.3.0 new flow."""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    fields = {
+        "stage": "validation",
+        "validation_kind": "summary",
+        "validation_difficulty": 2,
+        "validation_task": "用一句话向朋友解释机会成本",
+        "validation_target": "说出被放弃的次优选择",
+        "validation_passed": False,
+        "validation_attempts": 1,
+        "validation_history": json.dumps(
+            [
+                {
+                    "answer": "第一次回答",
+                    "understanding_level": "relationship",
+                    "last_response_quality": "partial",
+                    "understood": [],
+                    "uncertain": ["边界不清"],
+                    "misconceptions": [],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    }
+    fields.update(updates)
+    database.update_concept(cid, **fields)
+    return cid
+
+
+def test_app_continue_new_flow_resumes_validation(configured_app) -> None:
+    cid = _seed_new_flow_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "validation"
+    assert session.validation_attempts == 1
+    assert session.validation_task == "用一句话向朋友解释机会成本"
+    assert session.learner_state.understanding_level == "relationship"
+
+    # 重建的消息气泡：验证任务 + 上次回答 + 已分析气泡
+    msgs = at.session_state["messages"]
+    assert any("用一句话向朋友解释机会成本" in m["text"] for m in msgs)
+    assert any(m["text"] == "第一次回答" for m in msgs)
+    assert any("层级：relationship" in m["text"] for m in msgs)
+    # UI 直接渲染验证任务（不依赖气泡）
+    assert any("用一句话向朋友解释机会成本" in m.value for m in at.markdown)
+
+
+def test_app_continue_new_flow_resumes_offer(monkeypatch, configured_app) -> None:
+    """V0.3.1 — offer 残留会话（老数据）恢复后自动完成，不再询问「是否深入」。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient([]))
+    cid = _seed_new_flow_concept(
+        stage="offer",
+        validation_passed=True,
+        validation_attempts=0,
+        validation_history=json.dumps(
+            [{
+                "answer": "机会成本是我放弃的次优选择",
+                "understanding_level": "relationship",
+                "last_response_quality": "deep",
+                "understood": ["核心"],
+                "uncertain": [],
+                "misconceptions": [],
+            }],
+            ensure_ascii=False,
+        ),
+    )
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "complete"  # V0.3.1 — offer 残留会话自动视为完成
+    assert session.validation_passed is True
+    # 完成页出现，不再问「是否深入」
+    assert any("理解验证通过" in (s.value or "") for s in at.success)
+    assert not any("我想再深入一层" in (b.label or "") for b in at.button)
+
+
+def test_app_continue_new_flow_resumes_intervention(monkeypatch, configured_app) -> None:
+    """干预阶段中断：恢复后自动为下一条干预决策并推到屏幕上。"""
+    monkeypatch.setattr("core.session.DeepSeekClient", lambda: FakeClient([]))
+    cid = _seed_new_flow_concept(
+        stage="intervention",
+        validation_passed=False,
+        validation_attempts=1,
+        validation_history=json.dumps(
+            [{
+                "answer": "第一次回答",
+                "understanding_level": "relationship",
+                "last_response_quality": "partial",
+                "understood": [],
+                "uncertain": ["边界不清"],
+                "misconceptions": ["混淆"],
+            }],
+            ensure_ascii=False,
+        ),
+        deeper_answers=json.dumps(
+            [{
+                "question": "想一想成本指的是什么",
+                "answer": "成本是你放弃的次优选择",
+                "action": "hint",
+                "understanding_level": "relationship",
+                "last_response_quality": "partial",
+                "understood": [],
+                "uncertain": ["边界"],
+                "misconceptions": [],
+                "next_best_action": "hint",
+            }],
+            ensure_ascii=False,
+        ),
+        deeper_index=1,
+    )
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    at = click_by_label(at, "继续学习")
+    assert not at.exception
+    assert current_step(at) == "learning"
+
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "intervention"
+    assert session.current_intervention() is not None
+    # 已答的那条干预还原在消息里，下一条由决策器自动生成
+    msgs = at.session_state["messages"]
+    assert any("想一想成本指的是什么" in m["text"] for m in msgs)
+    assert any("机会成本里的“成本”指的是什么" in m["text"] for m in msgs)
+    assert any("最小干预" in (i.value or "") for i in at.info)
+
+
+# ------------------------------------------------- V0.3.0 history dual-flow
+
+
+def _seed_new_flow_finished_concept() -> int:
+    """Create a finished V0.3.0 new-flow concept with validation + deepening data."""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.update_concept(
+        cid,
+        mastery="搞懂了",
+        user_definition="机会成本是放弃的次优选择",
+        validation_type="definition",
+        validation_task="用一句话向朋友解释机会成本",
+        validation_target="说出被放弃的次优选择",
+        validation_passed=True,
+        validation_attempts=2,
+        validation_history=json.dumps(
+            [
+                {
+                    "answer": "第一次答错",
+                    "understanding_level": "relationship",
+                    "last_response_quality": "partial",
+                    "understood": [],
+                    "uncertain": ["边界"],
+                    "misconceptions": [],
+                },
+                {
+                    "answer": "机会成本是我放弃的次优选择",
+                    "understanding_level": "application",
+                    "last_response_quality": "deep",
+                    "understood": ["核心"],
+                    "uncertain": [],
+                    "misconceptions": [],
+                },
+            ],
+            ensure_ascii=False,
+        ),
+        deeper_questions=json.dumps(
+            ["深化一：如果不考虑机会成本会怎样？", "深化二：机会成本和沉没成本什么关系？"],
+            ensure_ascii=False,
+        ),
+        deeper_answers=json.dumps(
+            [
+                {"question": "深化一：如果不考虑机会成本会怎样？", "answer": "决策会失真"},
+                {"question": "深化二：机会成本和沉没成本什么关系？", "answer": "两者都关于选择"},
+            ],
+            ensure_ascii=False,
+        ),
+        deeper_index=2,
+    )
+    return cid
+
+
+def test_app_history_shows_new_flow_validation_and_deepening(configured_app) -> None:
+    """有「我的理解」的新流程概念：历史页应显示验证任务/作答/结果与深化追问。"""
+    _seed_new_flow_finished_concept()
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "用一句话向朋友解释机会成本" in text       # 验证任务
+    assert "第一次答错" in text                      # 第 1 次作答
+    assert "机会成本是我放弃的次优选择" in text       # 第 2 次作答
+    assert "✅ 通过" in text                          # 验证结果
+    assert "深化一：如果不考虑机会成本会怎样？" in text
+    assert "决策会失真" in text                       # 深化回答
+    assert "我的回答：两者都关于选择" in text
+
+
+def test_app_history_shows_new_flow_unfinished_without_definition(configured_app) -> None:
+    """尚无 user_definition 的新流程概念：走 format_detail 也应显示验证/深化记录。"""
+    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
+    database.update_concept(
+        cid,
+        validation_type="definition",
+        validation_task="解释一下机会成本",
+        validation_passed=False,
+        validation_attempts=2,
+        needs_relearning=True,
+        validation_history=json.dumps(
+            [{
+                "answer": "答错",
+                "understanding_level": "relationship",
+                "last_response_quality": "partial",
+                "understood": [],
+                "uncertain": ["边界"],
+                "misconceptions": [],
+            }],
+            ensure_ascii=False,
+        ),
+        deeper_questions=json.dumps(["不学机会成本会怎样？"], ensure_ascii=False),
+        deeper_answers=json.dumps([]),
+        deeper_index=1,
+    )
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "解释一下机会成本" in text
+    assert "❌ 未通过（连续 3 次，需要重新学习）" in text
+    assert "不学机会成本会怎样？" in text
+    assert "（未回答）" in text
+
+
+def test_app_history_legacy_qa_records_still_shown(configured_app) -> None:
+    """旧流程概念（无 validation_type）：历史页追问记录仍来自 qa_records。"""
+    cid = database.save_concept("机会成本", "原文")
+    database.save_qa(cid, "它关注过去还是未来？", "未来", True)
+    database.save_qa(cid, "和沉没成本的区别？", "一个看过去", False, hint_used=True)
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    assert current_step(at) == "history"
+
+    text = markdown_text(at)
+    assert "它关注过去还是未来？" in text
+    assert "和沉没成本的区别？" in text
+    assert "一个看过去" in text
+    assert "（用过提示）" in text
+
+
+# ---------------------------------------------------------------- V0.3.1 内置内容
+
+
+def test_builtin_concepts_module() -> None:
+    """V0.3.1 — 内置概念模块：5 个精选概念 + 查询接口。"""
+    from core.builtin_concepts import (
+        BUILTIN_CONCEPTS,
+        get_builtin_concept,
+        get_builtin_concepts,
+    )
+
+    assert len(get_builtin_concepts()) == 5
+    assert len(BUILTIN_CONCEPTS) == 5
+    for c in get_builtin_concepts():
+        assert c["id"] and c["title"] and c["source_text"]
+        assert c["difficulty"] in (1, 2)
+    c = get_builtin_concept("opportunity_cost")
+    assert c is not None and c["title"] == "机会成本"
+    assert "放弃" in c["source_text"]
+    assert get_builtin_concept("not_a_concept") is None
+
+
+def test_app_home_shows_builtin_featured_concepts(configured_app) -> None:
+    """V0.3.1 — 首页「精选概念」卡片：零输入即可开始学习。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert "精选概念" in markdown_text(at)
+    for title in ("机会成本", "复利", "幸存者偏差", "边际效用", "沉没成本"):
+        assert any(f"📖 {title}" in (b.label or "") for b in at.button)
+
+
+def test_app_first_open_recommends_a_builtin(configured_app) -> None:
+    """V0.3.1 — 首次打开（还没有任何概念时）自动推荐一个内置概念。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert any("先从一个精选概念开始" in (i.value or "") for i in at.info)
+
+
+def test_app_first_open_recommend_hidden_after_learning(configured_app) -> None:
+    """V0.3.1 — 已有学习记录后，不再显示首次打开推荐。"""
+    database.save_concept("自定义概念", "原文")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    assert not at.exception
+    assert not any("先从一个精选概念开始" in (i.value or "") for i in at.info)
+
+
+def test_app_builtin_concept_starts_learning_without_input(configured_app) -> None:
+    """V0.3.1 — 点击精选概念卡片：无需输入直接进入阅读阶段，原文自动带好。"""
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = at.button(key="builtin_opportunity_cost").click().run()
+    assert not at.exception
+    assert current_step(at) == "learning"
+    session = at.session_state["session"]
+    assert session.flow == "new"
+    assert session.stage == "reading"
+    assert session.title == "机会成本"
+    assert "机会成本" in session.source_text
+    concept = database.get_concept(session.concept_id)
+    assert concept["title"] == "机会成本"
+    assert concept["source_text"]
+
+
+def test_app_history_add_connection(configured_app) -> None:
+    """V0.3.1 — 连接移到历史页：可在概念详情里主动添加知识连接。"""
+    a = database.save_concept("机会成本", "原文A")
+    b = database.save_concept("沉没成本", "原文B")
+    database.update_concept(a, mastery="搞懂了")
+    at = AppTest.from_file(APP, default_timeout=15).run()
+    at = click_by_label(at, "历史回顾")
+    assert not at.exception
+    # 展开概念 b 的详情（a 已被首次进入时自动展开，再点会收起）
+    at = at.button(key=f"view_{b}").click().run()
+    assert not at.exception
+    assert at.session_state["history_view_id"] == b
+
+    # 点「添加知识连接」→ 表单出现，选择 a 并保存
+    at = at.button(key=f"add_conn_{b}").click().run()
+    assert not at.exception
+    at.selectbox(key=f"conn_pick_{b}").select("机会成本")
+    at.text_area(key=f"conn_rel_{b}").input("都关于选择")
+    at = at.button(key=f"conn_save_{b}").click().run()
+    assert not at.exception
+    conns = database.get_connections(b)
+    assert len(conns) == 1
+    assert conns[0]["concept_a_title"] == "机会成本"
+    assert conns[0]["relation_text"] == "都关于选择"

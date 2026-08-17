@@ -5,10 +5,16 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import re
+
 import pandas as pd
 import streamlit as st
 
 from core import (
+    DEEPER_QUESTION_ORDER,
     DeepSeekAuthError,
     DeepSeekError,
     LearningSession,
@@ -22,6 +28,7 @@ from core import (
     save_api_key_to_config,
     warmup_concept,
 )
+from core.builtin_concepts import get_builtin_concept, get_builtin_concepts
 from core.database import (
     delete_concept,
     get_all_concepts,
@@ -39,7 +46,9 @@ from core.database import (
     set_setting,
 )
 from core.models import MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
-from core.session import MAX_LAYER
+from core.session import MAX_LAYER, restore_session
+
+logger = logging.getLogger(__name__)
 
 MASTERY_LABELS = {
     MASTERY_UNDERSTOOD: "✅ 搞懂了",
@@ -47,6 +56,22 @@ MASTERY_LABELS = {
     MASTERY_LEARNING: "📖 学习中",
 }
 _MASTERY_ORDER = [MASTERY_UNDERSTOOD, MASTERY_UNCLEAR, MASTERY_LEARNING]
+
+# V0.3.0 — 新流程开关：RECALLOS_NEW_FLOW=0 时走旧四层追问流程（保留）
+_NEW_FLOW = os.environ.get("RECALLOS_NEW_FLOW", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+STAGE_LABELS = {
+    "reading": "📖 阅读中",
+    "validation": "🧠 验证理解",
+    "offer": "💬 是否深入?",
+    "intervention": "💡 最小干预",
+    "complete": "✅ 已完成",
+    "relearn": "🔄 需要重新学习",
+}
 
 
 def reset_to_home() -> None:
@@ -57,6 +82,11 @@ def reset_to_home() -> None:
     st.session_state.pop("review_messages", None)
     st.session_state.pop("review_finished", None)
     st.session_state.pop("concept_detail_id", None)
+    st.session_state.pop("pending_action", None)
+    st.session_state.pop("v_pending_answer", None)
+    st.session_state.pop("v_ai_error", None)
+    st.session_state.pop("v_deeper_question", None)
+    st.session_state.pop("summary_error", None)
     st.session_state.step = "home"
 
 
@@ -71,33 +101,111 @@ def _navigate(target: str) -> None:
 
 
 def _resume_learning(concept: dict) -> None:
-    """V0.2.3 — 从数据库恢复未完成的学习会话（重建 session 与 messages）。"""
-    session = LearningSession(concept["title"], concept.get("source_text") or "")
-    session.concept_id = concept["id"]
-    history = get_qa_history(concept["id"])
+    """V0.3.0 — 从数据库恢复未完成的学习会话。
+
+    - 概念带新流程标记（stage/validation_type 非空）→ 用 ``restore_session``
+      恢复完整的「阅读→验证→深化」状态与对话气泡；
+    - 否则走 V0.2.3 的旧流程恢复（重建 session 与 messages）。
+    """
+    is_new_flow = bool(concept.get("stage") or concept.get("validation_type"))
+    if not is_new_flow:
+        session = LearningSession(concept["title"], concept.get("source_text") or "")
+        session.concept_id = concept["id"]
+        history = get_qa_history(concept["id"])
+        messages: list[dict] = []
+        for qa in history:
+            messages.append({"role": "assistant", "text": qa["question"]})
+            if qa.get("user_answer"):
+                messages.append({"role": "user", "text": qa["user_answer"]})
+            session.qa_history.append(
+                {
+                    "question": qa["question"],
+                    "answer": qa.get("user_answer"),
+                    "is_correct": bool(qa.get("is_correct")),
+                    "hint": None,
+                }
+            )
+        if history:
+            session.layer = min(MAX_LAYER, len(history))
+            session._current_question = history[-1]["question"]
+        st.session_state.session = session
+        st.session_state.messages = messages
+        st.session_state.step = "learning"
+        st.rerun()
+        return
+
+    # ---- V0.3.0 新流程恢复（Learning Loop v2）----
+    session = restore_session(concept["id"])
     messages: list[dict] = []
-    for qa in history:
-        messages.append({"role": "assistant", "text": qa["question"]})
-        if qa.get("user_answer"):
-            messages.append({"role": "user", "text": qa["user_answer"]})
-        session.qa_history.append(
-            {
-                "question": qa["question"],
-                "answer": qa.get("user_answer"),
-                "is_correct": bool(qa.get("is_correct")),
-                "hint": None,
-            }
+    if session.validation_task:
+        messages.append(
+            {"role": "assistant", "text": f"📝 验证你的理解：\n\n{session.validation_task}"}
         )
-    if history:
-        session.layer = min(MAX_LAYER, len(history))
-        session._current_question = history[-1]["question"]
+    for entry in session.validation_history:
+        messages.append({"role": "user", "text": entry.get("answer", "")})
+        level = entry.get("understanding_level") or "surface"
+        messages.append(
+            {"role": "assistant", "text": f"✅ 已分析你的理解（层级：{level}）"}
+        )
+    for qa in session.deeper_history:
+        messages.append({"role": "assistant", "text": qa["question"]})
+        messages.append({"role": "user", "text": qa.get("answer", "")})
+    if session.stage == "offer":
+        messages.append({"role": "assistant", "text": "✅ 你已经理解核心概念。"})
     st.session_state.session = session
     st.session_state.messages = messages
+    # 清理旧的 AI 错误/重试状态，避免恢复会话时卡在重试界面
+    st.session_state.pop("v_pending_answer", None)
+    st.session_state.pop("v_ai_error", None)
+    st.session_state.pop("v_offer", None)
     st.session_state.step = "learning"
     st.rerun()
 
 
 # ------------------------------------------------------------------- home
+
+def _start_new_session(title: str, source: str) -> None:
+    """V0.3.1 — 新流程一键开始：保存概念并进入阅读阶段（本步骤不调用 AI）。"""
+    goal_map = {
+        "🧠 理解概念": "understand",
+        "🔗 建立联系": "connect",
+        "🛠 能实际应用": "apply",
+        "🎓 为考试掌握": "exam",
+    }
+    goal_label = st.session_state.get("v_learning_goal", "🧠 理解概念")
+    session = LearningSession(
+        title,
+        source,
+        learning_goal=goal_map.get(goal_label, "understand"),
+    )
+    session.flow = "new"
+    session.begin()
+    st.session_state.session = session
+    messages = []
+    if st.session_state.get("warmup_text"):
+        messages.append(
+            {"role": "assistant", "text": f"💡 {st.session_state['warmup_text']}"}
+        )
+    messages.append(
+        {"role": "assistant",
+         "text": f"📖 先读原文：**{title}**\n\n读完后点下方「我读完了」。"}
+    )
+    st.session_state.messages = messages
+    # 清理上一轮遗留的 AI 错误/重试状态 + 阅读导航归零
+    st.session_state["v_read_index"] = 0
+    st.session_state.pop("pending_action", None)
+    st.session_state.pop("v_pending_answer", None)
+    st.session_state.pop("v_ai_error", None)
+    st.session_state.step = "learning"
+
+
+def _start_builtin(concept_id: str) -> None:
+    """V0.3.1 — 从内置精选概念一键开始学习（无需任何输入）。"""
+    concept = get_builtin_concept(concept_id)
+    if concept is None:
+        return
+    _start_new_session(concept["title"], concept["source_text"])
+
 
 def render_home() -> None:
     st.markdown("<h1 style='text-align:center;color:#6B6B6B;font-size:20px'>📚 RecallOS</h1>",
@@ -112,41 +220,7 @@ def render_home() -> None:
                      type="primary", use_container_width=True):
             _navigate("review_list")
 
-    # V0.2.0 — 零基础/有基础模式切换 + 动态开场（2 个快速问题）
-    mode = "beginner"
-    if st.toggle("有基础（对这个概念有一定了解）", value=False, key="mode_toggle"):
-        mode = "advanced"
-    with st.expander("告诉我一点你的情况，我会调整开场（可选）"):
-        level_map = {"完全没接触过": "zero", "听说过一点": "some", "比较熟悉": "familiar"}
-        interest_map = {
-            "先弄懂基本意思": "simple",
-            "想深入理解": "deep",
-            "想结合生活例子": "example",
-        }
-        level_label = st.radio("你之前接触过这个概念吗？", list(level_map), horizontal=True)
-        interest_label = st.radio("今天想怎么学？", list(interest_map), horizontal=True)
-
-    # V0.2.3 — 预热按钮移到概念名输入框右侧（同一行，零基础模式）
-    col_title, col_warm = st.columns([5, 1])
-    with col_title:
-        title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
-    source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
-    with col_warm:
-        if mode == "beginner" and title.strip():
-            if st.button("💡 预热", key="warmup_btn"):
-                try:
-                    with st.spinner("AI 正在生成预热解释…"):
-                        st.session_state.warmup_text = warmup_concept(title, source)
-                    st.rerun()
-                except DeepSeekAuthError:
-                    st.error("Key 无效，请重新输入")
-                except DeepSeekError as exc:
-                    st.error(f"AI 调用失败：{exc}")
-
-    if mode == "beginner" and st.session_state.get("warmup_text"):
-        st.info(f"💡 {st.session_state['warmup_text']}")
-
-    # V0.2.3 — 继续学习入口：有未完成（学习中）的概念时显示在「开始」上方
+    # V0.2.3 — 继续学习入口：有未完成（学习中）的概念时显示
     unfinished = [
         c for c in get_all_concepts()
         if c.get("mastery") in (None, MASTERY_LEARNING)
@@ -156,32 +230,101 @@ def render_home() -> None:
         if st.button(f"📖 继续学习：{c['title']}", key="continue_learning"):
             _resume_learning(c)
 
-    if st.button("开始", type="primary", use_container_width=True, key="start_learning"):
-        if not title.strip():
-            st.info("试试粘贴一段课本内容")
-        else:
-            try:
-                with st.spinner("AI 正在思考…"):
-                    session = LearningSession(
-                        title,
-                        source,
-                        mode=mode,
-                        level=level_map.get(level_label, "zero"),
-                        interest=interest_map.get(interest_label, "simple"),
-                    )
-                    question = session.start()
-                st.session_state.session = session
-                messages = []
-                if mode == "beginner" and st.session_state.get("warmup_text"):
-                    messages.append({"role": "assistant", "text": f"💡 {st.session_state['warmup_text']}"})
-                messages.append({"role": "assistant", "text": question})
-                st.session_state.messages = messages
-                st.session_state.step = "learning"
-                st.rerun()
-            except DeepSeekAuthError:
-                st.error("Key 无效，请重新输入")
-            except DeepSeekError as exc:
-                st.error(f"AI 调用失败：{exc}")
+    st.divider()
+
+    # V0.3.1 — 首次打开自动推荐：一个内置概念让用户无需做任何决定
+    has_learned = bool(get_all_concepts())
+    builtins = get_builtin_concepts()
+    if not has_learned and builtins:
+        st.info(f"👋 先从一个精选概念开始——「{builtins[0]['title']}」"
+                f"（{builtins[0]['hook']}）")
+
+    # V0.3.1 — 首页两栏：精选概念卡片 + 自定义输入
+    col_feat, col_custom = st.columns([1, 1])
+    with col_feat:
+        st.markdown("### ✨ 精选概念")
+        st.caption("点击即可开始，无需任何输入")
+        for c in builtins:
+            st.button(
+                f"📖 {c['title']}",
+                key=f"builtin_{c['id']}",
+                use_container_width=True,
+                on_click=_start_builtin,
+                args=(c["id"],),
+            )
+        if not builtins:
+            st.caption("（暂无精选概念）")
+
+    with col_custom:
+        st.markdown("### ✍️ 自定义")
+        st.caption("想学自己的概念？粘一段原文，马上开始")
+        title = st.text_input("概念名（如：机会成本）", placeholder="试着填一个概念", key="home_title")
+        source = st.text_area("粘贴你想学的原文", placeholder="把课本内容或一段文字粘进来…", key="home_source")
+
+        # V0.3.0 — 新的学习目标（可选，不选默认「理解概念」）
+        if _NEW_FLOW:
+            goal_options = ["🧠 理解概念", "🔗 建立联系", "🛠 能实际应用", "🎓 为考试掌握"]
+            st.radio(
+                "你这次更想做到哪一步？（可选）",
+                goal_options,
+                index=0,
+                horizontal=True,
+                key="v_learning_goal",
+            )
+
+        # V0.2.3 — 预热按钮紧跟概念名输入框（同一行，零基础模式）
+        col_title, col_warm = st.columns([5, 1])
+        with col_warm:
+            if title.strip():
+                if st.button("💡 预热", key="warmup_btn", use_container_width=True):
+                    try:
+                        with st.spinner("AI 正在生成预热解释…"):
+                            st.session_state.warmup_text = warmup_concept(title, source)
+                        st.rerun()
+                    except DeepSeekAuthError:
+                        st.error("Key 无效，请重新输入")
+                    except DeepSeekError as exc:
+                        st.error(f"AI 调用失败：{exc}")
+
+        if st.session_state.get("warmup_text"):
+            st.info(f"💡 {st.session_state['warmup_text']}")
+
+        if st.button("开始", type="primary", use_container_width=True, key="start_learning"):
+            if not title.strip():
+                st.info("试试粘贴一段课本内容，或直接点左边精选概念")
+            elif _NEW_FLOW:
+                # V0.3.1 — 新流程：只存概念，进入「阅读原文」阶段（无 AI 调用）
+                try:
+                    _start_new_session(title, source)
+                    st.rerun()
+                except DeepSeekAuthError:
+                    st.error("Key 无效，请重新输入")
+                except DeepSeekError as exc:
+                    st.error(f"AI 调用失败：{exc}")
+            else:
+                # 旧流程（保留）：开场问题 + 四层追问
+                try:
+                    with st.spinner("AI 正在思考…"):
+                        session = LearningSession(
+                            title,
+                            source,
+                            mode="beginner",
+                            level="zero",
+                            interest="simple",
+                        )
+                        question = session.start()
+                    st.session_state.session = session
+                    messages = []
+                    if st.session_state.get("warmup_text"):
+                        messages.append({"role": "assistant", "text": f"💡 {st.session_state['warmup_text']}"})
+                    messages.append({"role": "assistant", "text": question})
+                    st.session_state.messages = messages
+                    st.session_state.step = "learning"
+                    st.rerun()
+                except DeepSeekAuthError:
+                    st.error("Key 无效，请重新输入")
+                except DeepSeekError as exc:
+                    st.error(f"AI 调用失败：{exc}")
 
     recent = get_recent_concepts(limit=1)
     streak = get_setting("streak", "0")
@@ -201,8 +344,25 @@ def render_messages() -> None:
         st.markdown(f'<div class="{bubble}">{m["text"]}</div>', unsafe_allow_html=True)
 
 
+def _render_stage_indicator(session: LearningSession) -> None:
+    """V0.3.0 — 顶部阶段指示器（仅新流程会话显示）。"""
+    if getattr(session, "flow", "legacy") != "new":
+        return
+    label = STAGE_LABELS.get(session.stage, session.stage)
+    st.info(f"当前阶段: {label}")
+
+
 def render_learning() -> None:
     session = st.session_state.session
+    _render_stage_indicator(session)
+    if getattr(session, "flow", "legacy") == "new":
+        _render_learning_new(session)
+    else:
+        _render_learning_old(session)
+
+
+def _render_learning_old(session: LearningSession) -> None:
+    # 旧流程（V0.3.0 之前）：保留四层追问 UI
     answer = st.chat_input("你的回答…")
 
     if answer:
@@ -255,6 +415,345 @@ def render_learning() -> None:
         render_connections()
 
 
+# V0.3.0 — AI 调用统一从「按钮回调」挪到 render 分支执行：
+# 按钮只负责设置 pending_action + st.rerun()；render 开头查到待办就执行对应 AI 调用。
+# 这样即使调用内部抛出任何未预期异常，也会被兜底转成可重试的气泡提示，
+# 不会让页面在转圈中卡死（CLI 正常、Web 点「开始」转圈的问题由此规避）。
+_PENDING_SPINNERS = {
+    "start_validation": "AI 正在设计验证任务…",
+    "start_validation_again": "AI 正在设计验证任务…",
+    "ask_simplify": "生成大白话解释…",
+    "submit_validation": "AI 正在分析你的理解…",
+    "choose_deepening": "AI 正在找下一个理解缺口…",
+    "submit_intervention": "AI 正在更新你的理解状态…",
+}
+
+
+def _run_pending(session: LearningSession) -> None:
+    """执行按钮触发的、需要 AI 的待办动作（参数已放进 session_state）。"""
+    action = st.session_state.get("pending_action")
+    print(f"[RecallOS][_run_pending] 开始 pending_action={action!r} stage={session.stage!r} has_answer={st.session_state.get('v_pending_answer') is not None}", flush=True)
+    if not action:
+        return
+    try:
+        with st.spinner(_PENDING_SPINNERS[action]):
+            if action in ("start_validation", "start_validation_again"):
+                task_text = session.start_validation()
+                prefix = "新一轮验证" if action == "start_validation_again" else "验证你的理解"
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"📝 {prefix}：\n\n{task_text}"})
+            elif action == "ask_simplify":
+                explanation = session.ask_simplify()
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": f"💡 大白话：\n\n{explanation}"})
+            elif action == "submit_validation":
+                answer = st.session_state.get("v_pending_answer")
+                if not answer:
+                    raise SessionError("缺少待分析的答案")
+                result = session.submit_validation(answer)
+                st.session_state.pop("v_pending_answer", None)
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
+            elif action == "choose_deepening":
+                result = session.choose_deepening(True)
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
+            elif action == "submit_intervention":
+                answer = st.session_state.get("v_pending_answer")
+                if not answer:
+                    raise SessionError("缺少待分析的答案")
+                result = session.submit_intervention_answer(answer)
+                st.session_state.pop("v_pending_answer", None)
+                if result["stage"] == "complete":
+                    if result.get("final_note"):
+                        st.session_state.messages.append(
+                            {"role": "assistant", "text": result["final_note"]})
+                elif result["stage"] == "intervention":
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["bubble"]})
+        st.session_state.pop("pending_action", None)
+    except DeepSeekAuthError:
+        print(f"[RecallOS][_run_pending][{action}] 失败：API Key 无效", flush=True)
+        st.session_state.pop("pending_action", None)
+        st.session_state.pop("v_pending_answer", None)
+        st.session_state.messages.append({"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+    except (DeepSeekError, SessionError) as exc:
+        print(f"[RecallOS][_run_pending][{action}] 失败(可重试)：{exc!r}", flush=True)
+        st.session_state.pop("pending_action", None)
+        st.session_state.messages.append(
+            {"role": "assistant", "text": f"❌ {exc}\n\n再试一次即可重试。"})
+    except Exception as exc:  # noqa: BLE001 —— 兜底：任何异常都转成可重试提示，杜绝转圈卡死
+        logger.exception("_run_pending[%s] 意外失败", action)
+        print(f"[RecallOS][_run_pending][{action}] 意外异常：{exc!r}", flush=True)
+        st.session_state.pop("pending_action", None)
+        st.session_state.pop("v_pending_answer", None)
+        st.session_state.messages.append(
+            {"role": "assistant", "text": f"❌ 出错了：{exc}，请再试一次。"})
+
+
+def _capture_chat_answer(session: LearningSession) -> None:
+    """在 `_run_pending` 之后捕获 chat_input 回答，并在同一 run 内立即消费。
+
+    绝不能在这里调用 st.rerun()：streamlit#7629 中 st.chat_input 的值会在手动
+    rerun 之后的 run 里被再次读到 → 同一个回答被重复提交/无限循环/界面无响应
+    （现象：验证通过后同一气泡连续出现多次）。回答由本 run 内的 _run_pending
+    直接处理，处理完 stage 已推进，因此页面渲染时按最新阶段画即可。
+    """
+    stage = session.stage
+    if stage == "validation":
+        placeholder, action = "合上原文，用自己的话把这件事讲清楚…", "submit_validation"
+    elif stage == "intervention" and session.current_intervention() is not None:
+        placeholder, action = "你的回答…", "submit_intervention"
+    else:
+        return
+    answer = st.chat_input(placeholder, key="v_chat")
+    print(f"[RecallOS][chat_input] stage={stage!r} action={action!r} answer={answer!r}", flush=True)
+    if not answer:
+        return
+    print(f"[RecallOS][chat_input] 已捕获回答 len={len(answer)}，交给 _run_pending 同 run 处理", flush=True)
+    st.session_state.messages.append({"role": "user", "text": answer})
+    st.session_state["v_pending_answer"] = answer
+    st.session_state["pending_action"] = action
+    _run_pending(session)
+
+
+def _render_pre_answer_signals(session: LearningSession) -> None:
+    """在 chat_input 之前渲染可选的用户信号输入（信心预测 / 干预反馈）。
+
+    全部可选、不阻塞：用户可以直接跳过用 chat_input 作答。
+    """
+    if session.stage == "validation" and session.should_ask_confidence():
+        st.markdown("### 🔮 猜一下")
+        st.caption("被提问之前先做个预测（可选，不猜也能继续）：")
+        c1, c2 = st.columns(2)
+        if c1.button("😊 应该可以讲清楚", key="v_conf_c", use_container_width=True):
+            session.record_confidence_prediction("😊 应该可以讲清楚")
+            st.rerun()
+        if c2.button("🤔 不确定，容易卡住", key="v_conf_u", use_container_width=True):
+            session.record_confidence_prediction("🤔 不确定，容易卡住")
+            st.rerun()
+    elif session.stage == "intervention" and session.feedback_pending():
+        st.markdown("### 💬 小反馈")
+        st.caption("刚才的提示有帮到你吗？（可选，也可以直接回答）")
+        c1, c2 = st.columns(2)
+        if c1.button("👍 清楚多了", key="v_fb_clear", use_container_width=True):
+            session.record_intervention_feedback("clear")
+            st.rerun()
+        if c2.button("🤔 还是有点懵", key="v_fb_unclear", use_container_width=True):
+            session.record_intervention_feedback("unclear")
+            st.rerun()
+
+
+def _reading_paragraphs(source_text: str) -> list[str]:
+    source_text = (source_text or "").strip()
+    if not source_text:
+        return []
+    return [p.strip() for p in source_text.split("\n\n") if p.strip()]
+
+
+def _split_sentences(text: str) -> list[str]:
+    """按中文/英文句末标点把一段文字切成句子。"""
+    parts = re.split(r"(?<=[。！？!?；;])", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _bold_keywords(text: str) -> str:
+    """阅读视觉辅助：把「」内的关键短语加粗；已带 ** 的直接保留。"""
+    if not text:
+        return text
+    if "**" in text:
+        return text
+    return re.sub(r"「([^「」]{2,12})」", r"**「\1」**", text)
+
+
+def _extract_key_sentences(text: str, n: int) -> list[str]:
+    """提取一段文字里最关键的 n 句（优先含「」/**强调**的，其次靠前的），保持原顺序。"""
+    sentences = _split_sentences(text)
+    if len(sentences) <= n:
+        return sentences
+    scored = []
+    for idx, sent in enumerate(sentences):
+        score = 0
+        if "「" in sent or "**" in sent:
+            score += 2
+        score += max(0, n - idx)  # 越靠前越重要
+        scored.append((score, idx, sent))
+    kept = sorted(scored, key=lambda t: (t[0], -t[1]), reverse=True)[:n]
+    return [s for _, _, s in sorted(kept, key=lambda t: t[1])]
+
+
+def _render_learning_new(session: LearningSession) -> None:
+    # V0.3.0 — 新流程：阅读原文 → 验证理解 → 深入选择 → 最小干预 → 完成
+    # 先执行按钮触发的 AI 待办，再捕获 chat_input 回答（同一 run 内处理，
+    # 不 st.rerun()，规避 streamlit#7629），最后按最新阶段渲染。
+    _run_pending(session)
+    _render_pre_answer_signals(session)
+    _capture_chat_answer(session)
+    stage = session.stage
+
+    if stage == "reading":
+        st.markdown("### 📖 阅读原文")
+        paragraphs = _reading_paragraphs(session.source_text)
+        if not paragraphs:
+            st.info("没有粘贴原文，直接开始验证也可以。")
+            if st.button("直接开始验证", key="v_read_done", type="primary"):
+                st.session_state["pending_action"] = "start_validation"
+                st.rerun()
+            return
+        # V0.3.1 修复 — 阅读拆段 + 每段引导问题：让阅读不是「纯读」，而是
+        # 每段用自己的话总结一句（记录到 reading_answers，作为验证与总结的上下文）。
+        # V0.3.1 hotfix — 一次一段：v_read_index 记录当前段，进度条 + 上/下一段 + 我读完了。
+        # 打开「📋 只看重点」只显示关键句（关键词加粗），全文收进展开面板，减少顿读感。
+        show_keys = st.toggle("📋 只看重点", key="v_read_show_keys")
+        total = len(paragraphs)
+        idx = st.session_state.get("v_read_index", 0)
+        if idx >= total:
+            idx = total - 1
+            st.session_state["v_read_index"] = idx
+        st.progress((idx + 1) / total)
+        st.markdown(f"**第 {idx + 1} 段 / 共 {total} 段**")
+        para = paragraphs[idx]
+        if show_keys and len(_split_sentences(para)) > 3:
+            keys = _extract_key_sentences(para, 3)
+            for k in keys:
+                st.markdown(f"- {_bold_keywords(k)}")
+            with st.expander("📄 展开原文"):
+                st.markdown(_bold_keywords(para))
+        else:
+            st.markdown(_bold_keywords(para))
+        answer = st.text_input(
+            "🗝️ 这段在说什么？（用自己的话总结一句）",
+            key=f"v_read_ans_{idx}",
+            placeholder="比如：机会成本就是——你选了A，就放弃了B",
+        )
+        if answer and answer != session.reading_answer_text(idx):
+            session.record_reading_answer(idx, answer)
+        c_prev, c_next, _ = st.columns([1, 1, 2])
+        with c_prev:
+            if st.button("◀ 上一段", key="v_read_prev", disabled=idx == 0):
+                st.session_state["v_read_index"] = idx - 1
+                st.rerun()
+        with c_next:
+            if st.button("下一段 ▶", key="v_read_next", disabled=idx >= total - 1):
+                st.session_state["v_read_index"] = idx + 1
+                st.rerun()
+        answered = session.reading_answer_count()
+        if answered > 0:
+            st.caption(f"✅ 已记录 {answered}/{total} 段的理解")
+        else:
+            st.caption("💡 试着每段都用一句话说出它讲了什么——这会让后面的验证更轻松")
+        if st.button("我读完了", key="v_read_done", type="primary"):
+            st.session_state["pending_action"] = "start_validation"
+            st.rerun()
+        return
+
+    if stage == "validation":
+        st.markdown("### 📝 验证你的理解")
+        with st.expander("📄 再看一眼原文"):
+            st.markdown(session.source_text or "（没有粘贴原文）")
+        if session.validation_task:
+            st.markdown(session.validation_task)
+
+        if st.button("😵 我看不懂，帮我解释", key="v_explain_btn"):
+            st.session_state["pending_action"] = "ask_simplify"
+            st.rerun()
+
+        render_messages()
+        return
+
+    if stage == "offer":
+        # V0.3.1 — offer 阶段已从主流程移除（验证过即完）。仅兼容历史数据：
+        # 恢复旧 offer 会话时直接视为完成，不再询问「是否深入」。
+        try:
+            session.choose_deepening(False)
+        except SessionError as exc:
+            st.session_state.messages.append(
+                {"role": "assistant", "text": f"❌ {exc}"})
+        st.session_state.pop("v_offer", None)
+        st.rerun()
+        return
+
+    if stage == "intervention":
+        st.markdown("### 💡 最小干预")
+        # 屏幕上那道干预未被回答过：AI 自动决策下一条（也用于恢复会话后自动续上）
+        intervention = session.current_intervention()
+        if intervention is None:
+            error = st.session_state.get("v_ai_error")
+            if error:
+                st.error(f"AI 决策干预失败：{error}")
+                render_messages()
+                if st.button("🔄 重试", key="v_retry_intervention"):
+                    st.session_state.pop("v_ai_error", None)
+                    st.rerun()
+                return
+            try:
+                with st.spinner("AI 正在找下一个理解缺口…"):
+                    result = session.next_intervention()
+            except DeepSeekAuthError:
+                st.session_state["v_ai_error"] = "Key 无效，请重新输入"
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
+                render_messages()
+                st.rerun()
+                return
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state["v_ai_error"] = str(exc)
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ {exc}"})
+                render_messages()
+                st.rerun()
+                return
+            except Exception as exc:  # noqa: BLE001 —— 兜底：不中断页面，转为可重试
+                logger.exception("干预决策意外失败")
+                st.session_state["v_ai_error"] = str(exc)
+                st.session_state.messages.append({"role": "assistant", "text": f"❌ 出错了：{exc}"})
+                render_messages()
+                st.rerun()
+                return
+            if result["stage"] == "complete":
+                if result.get("final_note"):
+                    st.session_state.messages.append(
+                        {"role": "assistant", "text": result["final_note"]})
+            else:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": result["bubble"]})
+            st.session_state.pop("v_ai_error", None)
+            st.rerun()
+            return
+
+        st.caption("跟着提示想一想，用自己的话回答就好，不用追求标准答案。")
+        render_messages()
+        return
+
+    if stage == "complete":
+        st.success("🎉 理解验证通过，今天学完啦！")
+        st.caption("学完只是一个开始——明天到点我会提醒你回来复习巩固。")
+        if st.button("查看今日总结", type="primary", use_container_width=True, key="v_finish"):
+            st.session_state.pop("v_deeper_question", None)
+            _navigate("summary")
+        return
+
+    if stage == "relearn":
+        st.error("连续 3 次没有通过验证，这个知识点建议回看原文后重新学习。")
+        if st.button("重新读一遍，再试一次", key="v_retry"):
+            st.session_state["pending_action"] = "start_validation_again"
+            st.rerun()
+        render_messages()
+        return
+
+    # 未知阶段兜底：只显示对话气泡
+    render_messages()
+
+
 # ------------------------------------------------------------------- review
 
 def render_review_list() -> None:
@@ -287,7 +786,7 @@ def render_review() -> None:
 
     st.markdown(f"## 📝 复习：{session.title}")
 
-    answer = st.chat_input("你的回答…")
+    answer = st.chat_input("你的回答…", key="v_chat_review")
 
     if not st.session_state.get("review_messages"):
         try:
@@ -317,16 +816,14 @@ def render_review() -> None:
                 {"role": "assistant", "text": reply})
             if session.phase == "finished":
                 st.session_state.review_finished = True
-            st.rerun()
         except DeepSeekAuthError:
             st.session_state.review_messages.append(
                 {"role": "assistant", "text": "❌ Key 无效，请重新输入"})
-            st.rerun()
         except (DeepSeekError, SessionError) as exc:
             st.session_state.review_messages.append(
                 {"role": "assistant", "text": f"❌ {exc}"})
-            st.rerun()
-        return
+        # 不 st.rerun()：同 run 内继续渲染以下气泡（st.chat_input 提交后手动
+        # rerun 会触发 streamlit#7629 —— 同一个值被再次读到、无限循环/无响应）
 
     for m in st.session_state.review_messages:
         role = m["role"]
@@ -392,6 +889,37 @@ def render_summary() -> None:
     session = st.session_state.session
     st.markdown("## ✅ 今天学完了")
     if st.session_state.get("summary_result") is None:
+        # V0.3.1 — 新流程完成即自动生成总结，无需用户再输入自己的话
+        if getattr(session, "flow", "legacy") == "new":
+            error = st.session_state.get("summary_error")
+            if error:
+                st.error(f"生成总结失败：{error}")
+                if st.button("🔄 重试", key="summary_retry"):
+                    st.session_state.pop("summary_error", None)
+                    st.rerun()
+                return
+            try:
+                had_summary = get_today_summary() is not None
+                with st.spinner("AI 正在帮你整理今天的收获…"):
+                    summary = session.finish_auto()
+                if not had_summary:
+                    streak = int(get_setting("streak", "0")) + 1
+                    set_setting("streak", str(streak))
+                st.session_state.summary_result = summary
+                st.rerun()
+            except DeepSeekAuthError:
+                st.session_state["summary_error"] = "Key 无效，请重新输入"
+                st.rerun()
+            except (DeepSeekError, SessionError) as exc:
+                st.session_state["summary_error"] = str(exc)
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001 —— 兜底：转为可重试
+                logger.exception("自动生成总结意外失败")
+                st.session_state["summary_error"] = str(exc)
+                st.rerun()
+            return
+
+        # 旧流程（保留）：手动输入「自己的话」再生成
         own = st.text_input("我终于搞懂了……（用你自己的话，可留空）")
         if st.button("生成总结", type="primary", use_container_width=True):
             had_summary = get_today_summary() is not None
@@ -405,23 +933,130 @@ def render_summary() -> None:
         return
 
     summary = st.session_state.summary_result
-    st.markdown(f"**我终于搞懂了：**\n\n{summary.breakthrough}")
+
+    # V0.3.1 修复 — 3 句话总结
+    st.markdown("### ✨ 你搞懂了什么")
+    st.markdown(f"> {summary.breakthrough}")
+    st.divider()
+    if getattr(summary, "plain", None):
+        st.markdown("### 💡 说白了我就是")
+        st.markdown(f"> {summary.plain}")
+        st.divider()
+    st.markdown("### 📌 明天 AI 会问你")
+    st.markdown(f"> {summary.tomorrow_hook}")
+    st.divider()
 
     all_concepts = get_all_concepts()
     mastered = sum(1 for c in all_concepts if c["mastery"] == MASTERY_UNDERSTOOD)
     conn_count = len(get_all_connections())
-    st.markdown("### 📊 今日收获")
-    st.markdown(f"- 搞懂了 **1** 个概念")
-    st.markdown(f"- 建立了 **{conn_count}** 条连接")
-    st.markdown(f"- 累计掌握 **{mastered}** 个概念")
+    st.caption(f"📊 累计掌握 {mastered} 个概念，建立 {conn_count} 条连接")
 
-    st.markdown(f"### 📌 明天AI会追问你\n\n{summary.tomorrow_hook}")
-
-    if st.button("明天继续", type="primary", use_container_width=True):
+    if st.button("👋 明天继续", type="primary", use_container_width=True):
         go_home()
+
+    # 可选项（放在开放式折叠里，不阻碍用户离开）
+    with st.expander("🔍 还想再挖深一点？（可选）"):
+        st.caption("如果今天还有没想透的地方，可以继续追问。")
+        if st.button("继续深入追问", key="summary_deeper"):
+            session.stage = "intervention"
+            st.session_state.step = "learning"
+            st.rerun()
+
+    with st.expander("🔗 查看相关概念（可选）"):
+        conns = get_connections(session.concept_id) if session.concept_id else []
+        if conns:
+            for conn in conns:
+                other_title = (
+                    conn["concept_a_title"]
+                    if conn["concept_a_title"] != session.title
+                    else conn["concept_b_title"]
+                )
+                st.markdown(f"- 与 **{other_title}** 的关系：{conn['relation_text']}")
+        else:
+            st.caption("（暂无连接，可以去历史页添加）")
 
 
 # ------------------------------------------------------------------ history
+
+def _load_json_list(raw) -> list:
+    """Parse a JSON-list column value; return [] for empty/invalid content."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _legacy_records_lines(concept: dict) -> list[str]:
+    """旧流程（V0.3.0 之前）的学习记录：qa_records 表里的逐层追问。"""
+    lines: list[str] = []
+    history = get_qa_history(concept["id"])
+    if not history:
+        lines.append("（无）")
+    for i, qa in enumerate(history, 1):
+        mark = "✓" if qa["is_correct"] else "✗"
+        hint = "（用过提示）" if qa["hint_used"] else ""
+        lines.append(f"\n**Q{i}** {qa['question']}")
+        lines.append(f"   {qa['user_answer']} {mark}{hint}")
+    return lines
+
+
+def _new_flow_records_lines(concept: dict) -> list[str]:
+    """V0.3.0 — 新流程（阅读→验证→深化）的学习记录。
+
+    验证任务与历史作答存在 concepts 表的 validation_* 字段，
+    深化追问存在 deeper_questions / deeper_answers 字段（JSON）。
+    """
+    lines: list[str] = []
+
+    task = concept.get("validation_task")
+    if task:
+        lines.append(f"**验证任务：**{task}")
+        for i, e in enumerate(_load_json_list(concept.get("validation_history")), 1):
+            answer = e.get("answer") or e.get("missing") or ""
+            level = e.get("understanding_level")
+            if level is not None:
+                # Learning Loop v2：答案是学习者的状态快照（无对错）
+                lines.append(f"- 第 {i} 次：{answer}（层级：{level}）")
+            elif e.get("passed"):
+                lines.append(f"- 第 {i} 次：{answer}（✅ 通过）")
+            else:
+                lines.append(f"- 第 {i} 次：{answer}（❌ 未通过）")
+        if concept.get("validation_passed"):
+            result = "✅ 通过"
+        elif concept.get("needs_relearning"):
+            result = "❌ 未通过（连续 3 次，需要重新学习）"
+        else:
+            result = "⏳ 进行中"
+        lines.append(f"**验证结果：**{result}")
+    else:
+        lines.append("**验证任务：**（尚未开始）")
+
+    deeper_qs = _load_json_list(concept.get("deeper_questions"))
+    if deeper_qs:
+        ans_by_q = {
+            e.get("question"): e.get("answer")
+            for e in _load_json_list(concept.get("deeper_answers"))
+        }
+        lines.append("**深化追问：**")
+        for i, q in enumerate(deeper_qs, 1):
+            lines.append(f"- 🔍 {i}. {q}")
+            lines.append(f"  我的回答：{ans_by_q.get(q) or '（未回答）'}")
+    else:
+        lines.append("**深化追问：**（尚未开始）")
+
+    return lines
+
+
+def _records_lines(concept: dict) -> list[str]:
+    """学习记录双流程支持：有新流程标记（validation_type 非空）显示验证+深化，
+    否则回退旧的 qa_records 显示。"""
+    if concept.get("validation_type"):
+        return _new_flow_records_lines(concept)
+    return _legacy_records_lines(concept)
+
 
 def format_detail(concept: dict) -> str:
     lines = [f"# {concept['title']}  {MASTERY_LABELS.get(concept['mastery'], concept['mastery'])}"]
@@ -431,14 +1066,7 @@ def format_detail(concept: dict) -> str:
         lines.append(f"\n**来源：**{concept['source_text']}")
 
     lines.append("\n## 追问记录")
-    history = get_qa_history(concept["id"])
-    if not history:
-        lines.append("（无）")
-    for i, qa in enumerate(history, 1):
-        mark = "✓" if qa["is_correct"] else "✗"
-        hint = "（用过提示）" if qa["hint_used"] else ""
-        lines.append(f"\n**Q{i}** {qa['question']}")
-        lines.append(f"   {qa['user_answer']} {mark}{hint}")
+    lines.extend(_records_lines(concept))
 
     lines.append("\n## 知识连接")
     conns = get_connections(concept["id"])
@@ -470,6 +1098,34 @@ def render_concept_detail() -> None:
         return
 
     st.markdown(f"## 📄 {concept['title']}")
+    # 详情页辅助入口：顶部保留删除按钮，两步式确认与历史页一致
+    st.button(
+        "🗑 删除这个概念",
+        key=f"detail_del_{concept['id']}",
+        on_click=_request_delete_concept,
+        args=(concept["id"],),
+    )
+    if st.session_state.get(f"confirm_x_{concept['id']}"):
+        st.warning(
+            f"确定删除「{concept['title']}」吗？"
+            "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
+        )
+        c_ok, c_no = st.columns(2)
+        with c_ok:
+            st.button(
+                "确认删除",
+                type="primary",
+                key=f"confirm_ok_{concept['id']}",
+                on_click=_confirm_delete_concept,
+                args=(concept["id"],),
+            )
+        with c_no:
+            st.button(
+                "取消",
+                key=f"confirm_no_{concept['id']}",
+                on_click=_cancel_delete_concept,
+                args=(concept["id"],),
+            )
     st.markdown(format_detail(concept))
 
     st.markdown("### 🔗 连接跳转")
@@ -515,54 +1171,41 @@ def _render_concept_detail_with_edit_button(concept: dict) -> None:
         st.session_state[f"edit_def_{concept['id']}"] = concept.get("user_definition", "")
 
 
-def render_history() -> None:
-    st.markdown("## 📚 我的知识")
-    concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
-    if not concepts:
-        st.info("还没有学习记录，先去主页开始一次学习吧。")
-        if st.button("返回主页"):
-            go_home()
-        return
+# ---- 历史页按钮使用 on_click 回调（事件由服务端处理，不依赖按钮返回值的 rerun 触发）----
+def _select_history_concept(cid: int) -> None:
+    # 再次点击当前展开的概念即收起；一次只展开一个
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
+    else:
+        st.session_state.history_view_id = cid
 
-    # ---- V0.2.3: 概念列表（每项带「✕」删除按钮，两步确认）----
-    st.markdown("### 📋 我的概念")
-    for c in concepts:
-        col_l, col_x = st.columns([6, 1])
-        with col_l:
-            st.markdown(f"**{c['title']}**  {MASTERY_LABELS.get(c['mastery'], c['mastery'])}")
-        with col_x:
-            if st.button("✕", key=f"xdel_{c['id']}"):
-                st.session_state[f"confirm_x_{c['id']}"] = True
-                st.rerun()
 
-    pending_delete = next(
-        (c for c in concepts if st.session_state.get(f"confirm_x_{c['id']}")), None
-    )
-    if pending_delete is not None:
-        st.warning(
-            f"确定删除「{pending_delete['title']}」吗？"
-            "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
-        )
-        col_ok, col_no = st.columns(2)
-        with col_ok:
-            if st.button("确认删除", type="primary", key=f"confirm_ok_{pending_delete['id']}"):
-                delete_concept(pending_delete["id"])
-                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
-                _navigate("history")
-        with col_no:
-            if st.button("取消", key=f"confirm_no_{pending_delete['id']}"):
-                st.session_state.pop(f"confirm_x_{pending_delete['id']}", None)
-                st.rerun()
-    st.divider()
+def _collapse_history_detail(cid: int) -> None:
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
 
-    idx = st.selectbox(
-        "选择概念查看详情",
-        range(len(concepts)),
-        format_func=lambda i: f"{concepts[i]['title']}  {MASTERY_LABELS.get(concepts[i]['mastery'], concepts[i]['mastery'])}",
-        key="history_select",
-    )
-    concept = concepts[idx]
 
+def _request_delete_concept(cid: int) -> None:
+    st.session_state[f"confirm_x_{cid}"] = True
+
+
+def _cancel_delete_concept(cid: int) -> None:
+    st.session_state.pop(f"confirm_x_{cid}", None)
+
+
+def _confirm_delete_concept(cid: int) -> None:
+    delete_concept(cid)
+    st.session_state.pop(f"confirm_x_{cid}", None)
+    if st.session_state.get("history_view_id") == cid:
+        st.session_state.history_view_id = None
+    if st.session_state.get("step") == "concept_detail":
+        # 详情页删除后回到历史页（回调内不能调用 st.rerun，靠回调后自动 rerun）
+        st.session_state.pop("concept_detail_id", None)
+        st.session_state.step = "history"
+
+
+def _render_history_inline_detail(concept: dict) -> None:
+    """V0.3.0 — 历史页「查看」选中的概念，详情行内展开（紧跟该概念行）。"""
     # ---- V0.2.3: 「我的理解」编辑功能（仅在有内容时显示）----
     if concept.get("user_definition"):
         edit_key = f"edit_def_{concept['id']}"
@@ -596,21 +1239,143 @@ def render_history() -> None:
         _render_concept_detail_without_edit(concept)
     # ---- 结束 V0.2.3 ----
 
+    # V0.3.0 — 有「我的理解」的新流程概念在这个分支不渲染 format_detail，
+    # 因此在这里补齐它的验证/深化记录显示（旧流程保持原样不变）。
+    if concept.get("validation_type") and concept.get("user_definition"):
+        st.markdown("### 追问记录")
+        st.markdown("\n".join(_new_flow_records_lines(concept)))
+
     conns = get_connections(concept["id"])
+    st.markdown("### 🔗 知识连接")
     if conns:
-        st.markdown("### 🔗 从连接跳转")
         for conn in conns:
             other_id = conn["concept_a_id"] if conn["concept_a_id"] != concept["id"] else conn["concept_b_id"]
             other_title = conn["concept_a_title"] if conn["concept_a_title"] != concept["title"] else conn["concept_b_title"]
-            if st.button(f"去往「{other_title}」", key=f"hist_jump_{idx}_{conn['id']}"):
+            st.markdown(f"**{other_title}**：{conn['relation_text']}")
+            if st.button(f"去往「{other_title}」", key=f"hist_jump_{concept['id']}_{conn['id']}"):
                 st.session_state.concept_detail_id = other_id
                 _navigate("concept_detail")
+    else:
+        st.caption("（暂无连接，可以点下方添加）")
+
+    # V0.3.1 — 连接移到历史页：学完后可在这里主动补充知识连接（可选）
+    if st.button("➕ 添加知识连接", key=f"add_conn_{concept['id']}"):
+        st.session_state[f"show_conn_{concept['id']}"] = True
+    if st.session_state.get(f"show_conn_{concept['id']}"):
+        others = [c for c in get_all_concepts() if c["id"] != concept["id"]]
+        if not others:
+            st.caption("还没有其他概念可以连接，先去主页学一个吧。")
+        else:
+            titles = {c["title"]: c["id"] for c in others}
+            pick = st.selectbox(
+                "连接到哪个概念？", list(titles), key=f"conn_pick_{concept['id']}"
+            )
+            rel = st.text_area(
+                "它们是什么关系？",
+                key=f"conn_rel_{concept['id']}",
+                height=80,
+                placeholder="比如：机会成本与沉没成本都关于「选择」",
+            )
+            if st.button("保存连接", key=f"conn_save_{concept['id']}"):
+                if rel.strip():
+                    save_connection(
+                        concept["id"], titles[pick], rel.strip(), is_user_edited=True
+                    )
+                    st.session_state.pop(f"show_conn_{concept['id']}", None)
+                    st.success("已保存")
+                    st.rerun()
+
+    st.button(
+        "关闭",
+        key=f"close_{concept['id']}",
+        on_click=_collapse_history_detail,
+        args=(concept["id"],),
+    )
+
+
+def render_history() -> None:
+    st.markdown("## 📚 我的知识")
+    concepts = sorted(get_all_concepts(), key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
+    if not concepts:
+        st.info("还没有学习记录，先去主页开始一次学习吧。")
+        if st.button("返回主页"):
+            go_home()
+        return
+
+    # 默认展开第一个概念（仅在首次进入历史页时；用户主动收起后不再自动展开）
+    if "history_init" not in st.session_state:
+        st.session_state.history_view_id = concepts[0]["id"]
+        st.session_state.history_init = True
+
+    # ---- V0.2.3: 三个独立表格，按掌握度分组（概念名称 / 操作，行内用分割线分隔）----
+    for group_key in _MASTERY_ORDER:
+        group = [c for c in concepts if c["mastery"] == group_key]
+        if not group:
+            continue
+        st.markdown(f"### {MASTERY_LABELS[group_key]}")
+        with st.container(border=True):
+            hd_l, hd_a = st.columns([6, 4])
+            with hd_l:
+                st.markdown("**概念名称**")
+            with hd_a:
+                st.markdown("**操作**")
+            st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
+            for i, c in enumerate(group):
+                col_l, col_a = st.columns([6, 4])
+                with col_l:
+                    st.markdown(f"**{c['title']}**")
+                with col_a:
+                    bv, bx = st.columns(2)
+                    with bv:
+                        st.button(
+                            "查看",
+                            key=f"view_{c['id']}",
+                            on_click=_select_history_concept,
+                            args=(c["id"],),
+                        )
+                    with bx:
+                        st.button(
+                            "✕",
+                            key=f"xdel_{c['id']}",
+                            on_click=_request_delete_concept,
+                            args=(c["id"],),
+                        )
+                # 行内两步确认：对话框紧跟被点行，避免跳到页面底部造成交互断层
+                if st.session_state.get(f"confirm_x_{c['id']}"):
+                    st.warning(
+                        f"确定删除「{c['title']}」吗？"
+                        "该概念的所有追问、连接、复习与总结记录都会被清除，且无法恢复。"
+                    )
+                    c_ok, c_no = st.columns(2)
+                    with c_ok:
+                        st.button(
+                            "确认删除",
+                            type="primary",
+                            key=f"confirm_ok_{c['id']}",
+                            on_click=_confirm_delete_concept,
+                            args=(c["id"],),
+                        )
+                    with c_no:
+                        st.button(
+                            "取消",
+                            key=f"confirm_no_{c['id']}",
+                            on_click=_cancel_delete_concept,
+                            args=(c["id"],),
+                        )
+                # 行内展开：被「查看」选中的概念，详情紧跟当前行下方显示
+                if c["id"] == st.session_state.get("history_view_id"):
+                    st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
+                    _render_history_inline_detail(c)
+                if i < len(group) - 1:
+                    st.markdown('<div class="row-divider"></div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------- main
 
 def _api_key_configured() -> bool:
-    return bool(get_settings().deepseek_api_key)
+    """已配置手动 Key，或已配置 Worker 分发（两者满足其一即可开始学习）。"""
+    settings = get_settings()
+    return bool(settings.deepseek_api_key) or bool(settings.recallos_worker_url)
 
 
 def render_api_key_setup() -> None:
@@ -704,6 +1469,26 @@ def inject_css() -> None:
         div.msg-user {
             background: #EFEBE4; padding: 10px 14px; border-radius: 12px;
             margin: 6px 0 6px auto; line-height: 1.6; max-width: 85%;
+        }
+        /* V0.2.3 — 历史页掌握度表格紧凑化：Excel 风格行高，低留白 */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 2px 8px;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] > div[data-testid="stVerticalBlock"] {
+            gap: 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] {
+            gap: 8px;
+            padding: 1px 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stMarkdownContainer"] {
+            line-height: 1.2;
+            margin: 0;
+        }
+        .row-divider {
+            border-top: 1px solid rgba(128, 128, 128, 0.35);
+            height: 0;
+            margin: 1px 0;
         }
         </style>""",
         unsafe_allow_html=True,

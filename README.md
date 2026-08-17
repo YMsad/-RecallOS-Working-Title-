@@ -60,6 +60,31 @@ RecallOS 相信：
 
 ---
 
+## 🌱 V0.3.0 新流程（阅读 → 验证 → 深化）
+
+V0.3.0 把「苏格拉底追问」重构成一条更贴近真实学习的完整链路：
+
+```text
+📖 阅读原文（先自己读，不被问题打断）
+  ↓
+🧠 验证理解（AI 出一道验证任务，检验你是真懂还是背出来的）
+  ↓
+🔍 深化追问（5 层递进：再验证 → 联系 → 反事实 → 行动 → 第一性原理）
+  ↓
+🔗 知识连接 + 📊 每日总结
+```
+
+**几个关键原则（延续 RecallOS 的核心哲学）：**
+
+- AI 不替你想——验证任务只检验你能否**自己说出来**；
+- 答不上来给「大白话」降维解释，而不是直接给答案；
+- 连续 3 次没通过验证，会提示你回看原文重新学（不硬送你过关）；
+- 「继续学习」可以在任何阶段（阅读 / 验证 / 深化中）精确续上，进度不会丢。
+
+> 🔄 想回到旧版四层追问？设置环境变量 `RECALLOS_NEW_FLOW=0` 即可。
+
+---
+
 ## 🚀 快速开始（开发版）
 
 ### 1. 克隆项目
@@ -99,6 +124,29 @@ DEEPSEEK_API_KEY="sk-你的密钥"
 DEEPSEEK_BASE_URL="https://api.deepseek.com/v1"
 DEEPSEEK_MODEL="deepseek-chat"
 ```
+
+> ⚠️ **注意**：不要将 `.env` 文件提交到 Git 或分享给他人，否则 API Key 可能泄露。
+
+### 4b. 可选：Cloudflare Worker 临时 Key 分发（V1.0）
+
+不想自己在 `.env` 里填 Key、又想给多台设备统一发 Key 时，可启用「Worker 优先 +
+手动 Key 兜底」：
+
+1. 部署 `workers/get-key.js`（`wrangler.toml` 已备好）：
+   ```bash
+   npm install -g wrangler
+   wrangler login
+   wrangler kv:namespace create "RECALLOS_KV"          # 把返回的 id 填进 wrangler.toml
+   wrangler deploy
+   ```
+2. 在 `.env` 增加一行：
+   ```ini
+   RECALLOS_WORKER_URL=https://你的子域.workers.dev
+   ```
+3. 客户端启动时自动向 Worker 取 24h 临时 Key（绑定设备指纹、每设备每日限额），
+   Worker 不可用 / 限额用尽时才回退 `.env` 里的 `DEEPSEEK_API_KEY`。
+
+用量监控与一键撤销（管理员）见 `scripts/monitor_usage.py`（每日定时跑 + Telegram 告警）。
 
 > ⚠️ **注意**：不要将 `.env` 文件提交到 Git 或分享给他人，否则 API Key 可能泄露。
 
@@ -173,7 +221,7 @@ RecallOS/
 │   ├── parser/              # PDF/EPUB 解析（V0.2）
 │   └── utils/
 │
-├── tests/                   # 测试（85 个全部通过）
+├── tests/                   # 测试（pytest 全量通过）
 │   ├── test_client.py       # 10 个 mock 测试
 │   ├── test_database.py     # 数据库测试
 │   ├── test_models.py       # 18 个模型测试
@@ -229,8 +277,10 @@ RecallOS 不关注：
 | V0.1 | MVP：追问 + 问答 + 本地存储 + CLI + Web | ✅ 已完成 |
 | V0.2.0 | 对话感升级：降维追问、零基础模式、解释模式、动态开场、认知反差 | ✅ 已完成 |
 | V0.2.1 | 思维模型：黄金圈、场景化提问、结构性类比、第一性原理、自动路由 | ✅ 已完成 |
-| V0.2.2 | 精细化：理解可编辑、Token 记账、历史删除 | +3 小时 |
-| V0.3 | 内容 + 平台扩展：PDF/EPUB/网页导入、多端打包 | +10 小时 |
+| V0.2.2 | 精细化：理解可编辑、Token 记账、历史删除 | ✅ 已完成 |
+| V0.2.3 | 用户体验修复 + 桌面版打包 | ✅ 已完成 |
+| V0.3.0 | 下一代学习流程：阅读 → 验证 → 深化（含继续学习恢复） | ✅ 已完成 |
+| V0.3.1 | 内容 + 平台扩展：PDF/EPUB/网页导入、多端打包 | +10 小时 |
 | V1.0 | 完整学习 OS（多模式 + 云同步 + 分析） | 待定 |
 
 ---
@@ -263,7 +313,7 @@ RecallOS 不关注：
 ## 📬 联系
 
 - 作者：YMsad
-- 项目状态：✅ V0.2.1 已完成（思维模型：黄金圈 / 场景化 / 类比 / 第一性原理 / 自动路由）
+- 项目状态：✅ V0.3.0 已完成（下一代学习流程：阅读 → 验证 → 深化，含「继续学习」精确恢复）
 - 反馈通道：GitHub Issues / Discussions
 
 > "真正的学习，不是收集知识，而是内化知识。"
