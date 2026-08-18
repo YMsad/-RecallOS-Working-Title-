@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -1502,6 +1504,22 @@ def inject_css() -> None:
     )
 
 
+def _save_feedback(content: str) -> None:
+    """Append one feedback entry to ~/.recallos/feedback.log."""
+    content = (content or "").strip()
+    if not content:
+        st.warning("Please write something before submitting.")
+        return
+    log_path = Path.home() / ".recallos" / "feedback.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{timestamp} | {content}\n")
+    st.success("✅ Thanks! I'll improve soon.")
+    st.session_state.show_feedback = False
+    st.session_state.pop("feedback_input", None)
+
+
 def main() -> None:
     st.set_page_config(page_title="RecallOS", page_icon="📚", layout="centered")
     init_db()
@@ -1521,6 +1539,25 @@ def main() -> None:
             _navigate("usage_stats")
         if st.button("🔑 Reconfigure API Key"):
             _navigate("reconfigure")
+
+        st.divider()
+        if st.button("💬 Feedback / Suggestions"):
+            st.session_state.show_feedback = not st.session_state.get("show_feedback", False)
+        if st.session_state.get("show_feedback", False):
+            feedback_text = st.text_area(
+                "What's getting in the way? Any suggestions?",
+                key="feedback_input",
+                placeholder="Tell me where you got stuck, or how I can improve…",
+            )
+            col_submit, col_cancel = st.columns(2)
+            with col_submit:
+                if st.button("Submit Feedback", use_container_width=True):
+                    _save_feedback(feedback_text)
+            with col_cancel:
+                if st.button("Cancel", use_container_width=True):
+                    st.session_state.show_feedback = False
+                    st.session_state.pop("feedback_input", None)
+                    st.rerun()
 
     step = st.session_state.get("step", "home")
     if step == "learning":
