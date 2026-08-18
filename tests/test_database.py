@@ -37,11 +37,11 @@ def test_init_creates_seven_tables() -> None:
 
 
 def test_save_and_get_concept() -> None:
-    cid = database.save_concept("机会成本", "为了得到它必须放弃的东西")
+    cid = database.save_concept("opportunity cost", "what you must give up to get it")
     row = database.get_concept(cid)
     assert row is not None
-    assert row["title"] == "机会成本"
-    assert row["source_text"] == "为了得到它必须放弃的东西"
+    assert row["title"] == "opportunity cost"
+    assert row["source_text"] == "what you must give up to get it"
     assert row["mastery"] == database.MASTERY_LEARNING
 
 
@@ -50,32 +50,32 @@ def test_get_missing_concept_returns_none() -> None:
 
 
 def test_update_concept() -> None:
-    cid = database.save_concept("沉没成本")
+    cid = database.save_concept("sunk cost")
     assert database.update_concept(cid, mastery=database.MASTERY_UNDERSTOOD,
-                                   user_definition="收不回来的投入")
+                                   user_definition="an investment you can't get back")
     row = database.get_concept(cid)
     assert row["mastery"] == database.MASTERY_UNDERSTOOD
-    assert row["user_definition"] == "收不回来的投入"
+    assert row["user_definition"] == "an investment you can't get back"
 
 
 def test_update_concept_validates_mastery() -> None:
-    cid = database.save_concept("边际效用")
+    cid = database.save_concept("marginal utility")
     with pytest.raises(ValueError):
         database.update_concept(cid, mastery="sure")
 
 
 def test_get_recent_concepts_orders_by_updated() -> None:
-    first = database.save_concept("稀缺")
-    second = database.save_concept("机会成本")
+    first = database.save_concept("scarcity")
+    second = database.save_concept("opportunity cost")
     database.update_concept(first, user_definition="X")  # touch first
     recent = database.get_recent_concepts(limit=5)
     assert [c["id"] for c in recent] == [first, second]
 
 
 def test_save_qa_and_history() -> None:
-    cid = database.save_concept("机会成本")
-    qa1 = database.save_qa(cid, "它关注过去还是未来？", "未来", True)
-    qa2 = database.save_qa(cid, "和沉没成本的区别？", "", False, hint_used=True)
+    cid = database.save_concept("opportunity cost")
+    qa1 = database.save_qa(cid, "Does it look to the past or the future?", "the future", True)
+    qa2 = database.save_qa(cid, "What's the difference from sunk cost?", "", False, hint_used=True)
     history = database.get_qa_history(cid)
     assert [h["id"] for h in history] == [qa1, qa2]
     assert history[1]["is_correct"] == 0
@@ -83,33 +83,33 @@ def test_save_qa_and_history() -> None:
 
 
 def test_save_connection_normalizes_order() -> None:
-    a = database.save_concept("机会成本")
-    b = database.save_concept("沉没成本")
-    database.save_connection(a, b, "一个看未来，一个看过去")
+    a = database.save_concept("opportunity cost")
+    b = database.save_concept("sunk cost")
+    database.save_connection(a, b, "one looks to the future, one to the past")
     # reversed insertion must not duplicate
-    database.save_connection(b, a, "一个看未来，一个看过去")
+    database.save_connection(b, a, "one looks to the future, one to the past")
     conns = database.get_connections(a)
     assert len(conns) == 1
     assert conns[0]["concept_a_id"] == min(a, b)
     assert conns[0]["concept_b_id"] == max(a, b)
-    assert conns[0]["concept_a_title"] in {"机会成本", "沉没成本"}
+    assert conns[0]["concept_a_title"] in {"opportunity cost", "sunk cost"}
 
 
 def test_get_connections_returns_both_directions() -> None:
-    a = database.save_concept("机会成本")
-    b = database.save_concept("沉没成本")
-    c = database.save_concept("边际效用")
-    database.save_connection(a, b, "都是选择概念")
-    database.save_connection(a, c, "都与价值有关")
+    a = database.save_concept("opportunity cost")
+    b = database.save_concept("sunk cost")
+    c = database.save_concept("marginal utility")
+    database.save_connection(a, b, "both about choice")
+    database.save_connection(a, c, "both about value")
     conns = database.get_connections(a)
     assert len(conns) == 2
 
 
 def test_cascade_delete_removes_qa_and_connections() -> None:
-    a = database.save_concept("机会成本")
-    b = database.save_concept("沉没成本")
+    a = database.save_concept("opportunity cost")
+    b = database.save_concept("sunk cost")
     database.save_qa(a, "Q?", "A", True)
-    database.save_connection(a, b, "关联")
+    database.save_connection(a, b, "related")
     assert database.delete_concept(a) is True
     assert database.get_qa_history(a) == []
     assert database.get_connections(a) == []
@@ -117,12 +117,12 @@ def test_cascade_delete_removes_qa_and_connections() -> None:
 
 
 def test_delete_concept_cascade() -> None:
-    a = database.save_concept("机会成本")
-    b = database.save_concept("沉没成本")
-    database.save_qa(a, "它关注过去还是未来？", "未来", True)
-    database.save_connection(a, b, "一个看过去一个看未来")
-    database.save_review_log(a, "机会成本是什么？", "放弃的价值", True)
-    database.save_daily_summary(a, "我终于搞懂了机会成本", "明天再想")
+    a = database.save_concept("opportunity cost")
+    b = database.save_concept("sunk cost")
+    database.save_qa(a, "Does it look to the past or the future?", "the future", True)
+    database.save_connection(a, b, "one looks to the past, one to the future")
+    database.save_review_log(a, "What is opportunity cost?", "the value you gave up", True)
+    database.save_daily_summary(a, "I finally understood opportunity cost", "More to think about tomorrow")
     database.save_usage_log(model="deepseek-chat", total_tokens=10, concept_id=a)
 
     assert database.delete_concept(a) is True
@@ -133,7 +133,7 @@ def test_delete_concept_cascade() -> None:
     assert database.get_review_logs(a) == []
     assert database.get_daily_summaries_for_concept(a) == []
     assert database.get_usage_summary()["calls"] == 0
-    # 与之建立连接的另一概念不受影响
+    # the other concept it was connected to is unaffected
     assert database.get_concept(b) is not None
 
 
@@ -147,15 +147,15 @@ def test_foreign_key_enforced() -> None:
 
 
 def test_connection_check_constraint_rejects_self_and_reversed() -> None:
-    a = database.save_concept("机会成本")
-    b = database.save_concept("沉没成本")
+    a = database.save_concept("opportunity cost")
+    b = database.save_concept("sunk cost")
     with database._get_conn() as conn:
         # a == b violates CHECK (concept_a_id != concept_b_id)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO connections (concept_a_id, concept_b_id, relation_text) "
                 "VALUES (?, ?, ?)",
-                (a, a, "自连"),
+                (a, a, "self-link"),
             )
         # reversed order violates CHECK (concept_a_id < concept_b_id)
         high, low = (a, b) if a > b else (b, a)
@@ -163,18 +163,18 @@ def test_connection_check_constraint_rejects_self_and_reversed() -> None:
             conn.execute(
                 "INSERT INTO connections (concept_a_id, concept_b_id, relation_text) "
                 "VALUES (?, ?, ?)",
-                (high, low, "乱序"),
+                (high, low, "out of order"),
             )
 
 
 def test_daily_summary() -> None:
-    cid = database.save_concept("供需平衡")
-    database.save_daily_summary(cid, "我终于搞懂了供需曲线",
-                                tomorrow_hook="边际效用与机会成本的关系？")
+    cid = database.save_concept("supply-demand balance")
+    database.save_daily_summary(cid, "I finally understood the supply-demand curve",
+                                tomorrow_hook="What's the relationship between marginal utility and opportunity cost?")
     today = database.get_today_summary()
     assert today is not None
     assert today["concept_id"] == cid
-    assert today["breakthrough_text"] == "我终于搞懂了供需曲线"
+    assert today["breakthrough_text"] == "I finally understood the supply-demand curve"
     assert database.get_daily_summaries(limit=5)[0]["tomorrow_hook"]
 
 
@@ -183,13 +183,13 @@ def test_daily_summary_none_when_nothing_saved() -> None:
 
 
 def test_daily_summaries_for_concept() -> None:
-    c1 = database.save_concept("机会成本")
-    c2 = database.save_concept("沉没成本")
-    database.save_daily_summary(c1, "搞懂了机会成本")
-    database.save_daily_summary(c2, "搞懂了沉没成本", date="2026-08-01")
+    c1 = database.save_concept("opportunity cost")
+    c2 = database.save_concept("sunk cost")
+    database.save_daily_summary(c1, "understood opportunity cost")
+    database.save_daily_summary(c2, "understood sunk cost", date="2026-08-01")
     summaries = database.get_daily_summaries_for_concept(c1)
     assert len(summaries) == 1
-    assert summaries[0]["breakthrough_text"] == "搞懂了机会成本"
+    assert summaries[0]["breakthrough_text"] == "understood opportunity cost"
     assert database.get_daily_summaries_for_concept(c2)[0]["date"] == "2026-08-01"
 
 
@@ -268,9 +268,10 @@ def test_usage_trend_groups_by_day() -> None:
 
 
 def test_update_concept_user_signals_columns() -> None:
-    """V0.3.1 — learning_goal / intervention_feedback / signals 三列可读写。
-    旧库迁移（ALTER TABLE ADD COLUMN）后同样可写。"""
-    cid = database.save_concept("机会成本")
+    """V0.3.1 — the three signal columns (learning_goal / intervention_feedback /
+    signals) are readable and writable, including after the legacy ALTER TABLE
+    ADD COLUMN migration."""
+    cid = database.save_concept("opportunity cost")
     assert database.update_concept(
         cid,
         learning_goal="apply",
@@ -282,14 +283,15 @@ def test_update_concept_user_signals_columns() -> None:
     assert row["intervention_feedback"] == '[{"action": "hint", "feedback": "clear"}]'
     assert row["signals"] == '{"reading_signals": []}'
 
-    # None 参数不覆盖已写值；合法值才会写入
+    # None params don't overwrite already-written values; valid values are written
     database.update_concept(cid, mastery=database.MASTERY_UNDERSTOOD)
     row = database.get_concept(cid)
     assert row["learning_goal"] == "apply"
 
 
 def test_migration_adds_user_signal_columns(tmp_path) -> None:
-    """模拟 V0.3.0 老库（无三列）→ init_db 迁移后自动补齐。"""
+    """Simulates a V0.3.0 legacy DB (no signal columns) that init_db migrates:
+    the ALTER TABLE ADD COLUMN pass fills them in automatically."""
     legacy = tmp_path / "legacy.db"
     with sqlite3.connect(legacy) as conn:
         conn.execute(
@@ -299,12 +301,12 @@ def test_migration_adds_user_signal_columns(tmp_path) -> None:
             "user_definition TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
         )
-    database.configure(legacy)  # 切换 DB_PATH 并触发 init_db 迁移
+    database.configure(legacy)  # switch DB_PATH and trigger the init_db migration
     assert database.DB_PATH == legacy
     with sqlite3.connect(legacy) as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(concepts)").fetchall()}
     assert {"learning_goal", "intervention_feedback", "signals"} <= cols
 
-    cid = database.save_concept("沉没成本")
+    cid = database.save_concept("sunk cost")
     database.update_concept(cid, signals="{}")
     assert database.get_concept(cid)["signals"] == "{}"

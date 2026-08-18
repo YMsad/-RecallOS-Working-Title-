@@ -57,13 +57,13 @@ async function handleGetKey(request, env) {
 
   // 1. 验证设备指纹：必须为 64 位十六进制
   if (!/^[0-9a-fA-F]{64}$/.test(deviceId)) {
-    return jsonResponse({ error: '无效的设备标识', code: 'INVALID_DEVICE' }, 400);
+    return jsonResponse({ error: 'Invalid device identifier', code: 'INVALID_DEVICE' }, 400);
   }
 
   // 2. 是否已被管理员全局撤销
   if ((await env.KV.get('global:revoked')) === '1') {
     return jsonResponse(
-      { error: '服务已暂停，请稍后再试', code: 'REVOKED' },
+      { error: 'Service temporarily paused, please try again later', code: 'REVOKED' },
       403
     );
   }
@@ -76,7 +76,7 @@ async function handleGetKey(request, env) {
   if (usageCount >= CONFIG.DAILY_LIMIT) {
     return jsonResponse(
       {
-        error: '今日学习次数已用尽，明天再来吧',
+        error: 'Daily study quota reached, please come back tomorrow',
         code: 'DAILY_LIMIT_EXCEEDED',
         limit: CONFIG.DAILY_LIMIT,
         dailyUsed: usageCount,
@@ -116,7 +116,7 @@ async function handleRevoke(request, env, revoke) {
   const secret = url.searchParams.get('secret') || '';
 
   if (secret !== CONFIG.ADMIN_SECRET) {
-    return jsonResponse({ error: '未授权', code: 'UNAUTHORIZED' }, 401);
+    return jsonResponse({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, 401);
   }
 
   // 全局版本号：每次撤销/恢复 +1，客户端可用它判断是否强制重取
@@ -140,8 +140,8 @@ async function handleRevoke(request, env, revoke) {
     revoked: revoke,
     version: newVersion,
     message: revoke
-      ? '所有 Key 已撤销，新的 /get-key 请求将被拒绝'
-      : '服务已恢复',
+      ? 'All keys revoked; new /get-key requests will be rejected'
+      : 'Service restored',
     timestamp: new Date().toISOString(),
   });
 }

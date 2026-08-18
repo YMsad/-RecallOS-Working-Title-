@@ -29,11 +29,11 @@ from core.database import (
 )
 from core.models import MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD
 
-EXIT_WORDS = {"q", "quit", "exit", "退出", "再见"}
+EXIT_WORDS = {"q", "quit", "exit", "bye", "退出", "再见"}
 MASTERY_LABELS = {
-    MASTERY_UNDERSTOOD: "✅ 搞懂了",
-    MASTERY_UNCLEAR: "🔄 模糊",
-    MASTERY_LEARNING: "📖 学习中",
+    MASTERY_UNDERSTOOD: "✅ Understood",
+    MASTERY_UNCLEAR: "🔄 Unclear",
+    MASTERY_LEARNING: "📖 Learning",
 }
 _MASTERY_ORDER = [MASTERY_UNDERSTOOD, MASTERY_UNCLEAR, MASTERY_LEARNING]
 
@@ -50,10 +50,10 @@ def read_line(prompt: str) -> str | None:
 
 
 def _learn() -> None:
-    title = read_line("今天想弄懂什么（概念名）：")
+    title = read_line("What do you want to understand today (concept name): ")
     if title is None:
         return
-    source = read_line("粘贴想学的原文（可留空）：") or ""
+    source = read_line("Paste the source text to learn (optional): ") or ""
 
     try:
         with DeepSeekClient() as client:
@@ -61,7 +61,7 @@ def _learn() -> None:
             question = session.start()
             while question is not None:
                 print(f"\n🤔 {question}")
-                answer = read_line("你的回答：")
+                answer = read_line("Your answer: ")
                 if answer is None:
                     return
                 result = session.submit_answer(answer)
@@ -70,29 +70,29 @@ def _learn() -> None:
                 else:
                     print(f"🤔 {result['feedback']}")
                     if result["hint"]:
-                        print(f"💡 提示：{result['hint']}")
+                        print(f"💡 Hint: {result['hint']}")
                     if result["reference"]:
-                        print(f"📖 参考：{result['reference']}")
+                        print(f"📖 Reference: {result['reference']}")
                 if result["is_done"]:
                     break
                 question = session.next_question()
 
-            print("\n🔗 知识连接推荐：")
+            print("\n🔗 Suggested knowledge connections:")
             for conn in session.get_connections():
-                print(f"- {conn.concept_title}：{conn.relation_text}")
+                print(f"- {conn.concept_title}: {conn.relation_text}")
 
-            own_words = read_line("\n今天最大的收获（用自己的话，可留空）：") or ""
+            own_words = read_line("\nBiggest takeaway today (your own words, optional): ") or ""
             summary = session.finish(user_definition=own_words)
             print("\n" + "=" * 44)
-            print(f"✅ 我终于搞懂了：\n{summary.breakthrough}")
-            print(f"\n📌 明天AI会追问你：\n{summary.tomorrow_hook}")
+            print(f"✅ I finally got it:\n{summary.breakthrough}")
+            print(f"\n📌 Tomorrow's hook:\n{summary.tomorrow_hook}")
             print("=" * 44)
     except DeepSeekError as exc:
-        print(f"\n❌ AI 调用失败：{exc}")
+        print(f"\n❌ AI call failed: {exc}")
     except SessionError as exc:
-        print(f"\n❌ 流程错误：{exc}")
+        print(f"\n❌ Flow error: {exc}")
     except KeyboardInterrupt:
-        print("\n再见！")
+        print("\nGoodbye!")
 
 
 def show_detail(concept: dict) -> None:
@@ -101,59 +101,59 @@ def show_detail(concept: dict) -> None:
     print("\n" + "=" * 44)
     print(f"📖 {concept['title']}  {MASTERY_LABELS.get(concept['mastery'], concept['mastery'])}")
     if concept.get("user_definition"):
-        print(f"我的理解：{concept['user_definition']}")
+        print(f"My understanding: {concept['user_definition']}")
     if concept.get("source_text"):
-        print(f"来源：{concept['source_text']}")
+        print(f"Source: {concept['source_text']}")
 
-    print("\n—— 追问记录 ——")
+    print("\n—— Socratic Q&A ——")
     history = get_qa_history(cid)
     if not history:
-        print("（无）")
+        print("(none)")
     for i, qa in enumerate(history, 1):
         mark = "✓" if qa["is_correct"] else "✗"
-        hint = "（用过提示）" if qa["hint_used"] else ""
+        hint = " (used hint)" if qa["hint_used"] else ""
         print(f"{i}. Q: {qa['question']}")
         print(f"   A: {qa['user_answer']} {mark}{hint}")
 
-    print("\n—— 知识连接 ——")
+    print("\n—— Knowledge connections ——")
     conns = get_connections(cid)
     if not conns:
-        print("（无）")
+        print("(none)")
     for conn in conns:
-        print(f"- {conn['concept_a_title']} ↔ {conn['concept_b_title']}：{conn['relation_text']}")
+        print(f"- {conn['concept_a_title']} ↔ {conn['concept_b_title']}: {conn['relation_text']}")
 
-    print("\n—— 每日总结 ——")
+    print("\n—— Daily summaries ——")
     summaries = get_daily_summaries_for_concept(cid)
     if not summaries:
-        print("（无）")
+        print("(none)")
     for s in summaries:
         if s.get("breakthrough_text"):
-            print(f"我终于搞懂了：{s['breakthrough_text']}")
+            print(f"I finally got it: {s['breakthrough_text']}")
         if s.get("tomorrow_hook"):
-            print(f"明天AI会追问：{s['tomorrow_hook']}")
+            print(f"Tomorrow's hook: {s['tomorrow_hook']}")
 
 
 def _history() -> None:
     concepts = get_all_concepts()
     if not concepts:
-        print("还没有学习记录。先运行主模式开始一次学习吧。")
+        print("No learning records yet. Run the main mode to start a session.")
         return
     ordered = sorted(concepts, key=lambda c: _MASTERY_ORDER.index(c["mastery"]))
 
     print("=" * 44)
-    print("📚 RecallOS 历史回顾")
+    print("📚 RecallOS History")
     print("=" * 44)
     while True:
         for i, c in enumerate(ordered, 1):
             print(f" {i:>2}. {c['title']}  {MASTERY_LABELS.get(c['mastery'], c['mastery'])}")
-        choice = read_line("\n输入编号查看详情，q 退出：")
+        choice = read_line("\nEnter a number to view details, q to quit: ")
         if choice is None:
             return
         if choice.isdigit() and 1 <= int(choice) <= len(ordered):
             show_detail(ordered[int(choice) - 1])
             print("\n" + "-" * 44)
         else:
-            print("无效输入，请输入列表中的编号。")
+            print("Invalid input, please enter a number from the list.")
 
 
 def _ensure_api_key() -> bool:
@@ -165,7 +165,7 @@ def _ensure_api_key() -> bool:
         return True
     while True:
         try:
-            line = input("请输入你的 DeepSeek API Key:").strip()
+            line = input("Enter your DeepSeek API Key:").strip()
         except (KeyboardInterrupt, EOFError):
             return False
         if not line:
@@ -175,24 +175,24 @@ def _ensure_api_key() -> bool:
         try:
             with DeepSeekClient() as client:
                 client.chat(
-                    [{"role": "user", "content": "请只回复两个字：连通"}], max_tokens=10
+                    [{"role": "user", "content": "Please reply with exactly two characters: OK"}], max_tokens=10
                 )
             return True
         except DeepSeekAuthError:
-            print("Key 无效，请重新输入")
+            print("Invalid key, please try again")
             continue
         except DeepSeekError:
             return True
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="RecallOS", description="把学习变成思考")
-    parser.add_argument("--history", action="store_true", help="回顾历史学习记录")
+    parser = argparse.ArgumentParser(prog="RecallOS", description="Turn studying into thinking")
+    parser.add_argument("--history", action="store_true", help="Review past learning records")
     args = parser.parse_args(argv)
 
     print("=" * 44)
-    print("RecallOS — 把学习变成思考")
-    print("随时输入 q / 退出 结束")
+    print("RecallOS — turn studying into thinking")
+    print("Press q / quit anytime to exit")
     print("=" * 44)
     init_db()
 

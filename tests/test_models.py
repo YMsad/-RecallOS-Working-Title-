@@ -26,7 +26,7 @@ def test_concept_requires_title() -> None:
 
 
 def test_concept_strips_whitespace() -> None:
-    assert Concept(title="  机会成本  ").title == "机会成本"
+    assert Concept(title="  opportunity cost  ").title == "opportunity cost"
 
 
 def test_concept_empty_title_rejected() -> None:
@@ -35,26 +35,26 @@ def test_concept_empty_title_rejected() -> None:
 
 
 def test_concept_default_mastery() -> None:
-    assert Concept(title="机会成本").mastery == MASTERY_LEARNING
+    assert Concept(title="opportunity cost").mastery == MASTERY_LEARNING
 
 
 def test_concept_valid_mastery() -> None:
-    assert Concept(title="机会成本", mastery=MASTERY_UNDERSTOOD).mastery == "搞懂了"
+    assert Concept(title="opportunity cost", mastery=MASTERY_UNDERSTOOD).mastery == "Understood"
 
 
 def test_concept_invalid_mastery_rejected() -> None:
     with pytest.raises(ValidationError):
-        Concept(title="机会成本", mastery="sure")
+        Concept(title="opportunity cost", mastery="sure")
 
 
 def test_concept_builds_from_db_row() -> None:
     concept = Concept.model_validate(
         {
             "id": 1,
-            "title": "机会成本",
-            "user_definition": "放弃的价值",
-            "source_text": "原文",
-            "mastery": "搞懂了",
+            "title": "opportunity cost",
+            "user_definition": "the value you gave up",
+            "source_text": "source",
+            "mastery": "Understood",
             "created_at": "2026-08-02 10:00:00",
             "updated_at": "2026-08-02 10:00:00",
         }
@@ -69,7 +69,7 @@ def test_qa_requires_concept_id_and_question() -> None:
     with pytest.raises(ValidationError):
         QARecord(concept_id=1)
     with pytest.raises(ValidationError):
-        QARecord(question="问题")
+        QARecord(question="question")
 
 
 def test_qa_bool_coercion_from_db() -> None:
@@ -89,19 +89,19 @@ def test_qa_bool_coercion_from_db() -> None:
 # ---------------------------------------------------------------- Connection
 
 def test_connection_normalizes_order() -> None:
-    conn = Connection(concept_a_id=5, concept_b_id=3, relation_text="关联")
+    conn = Connection(concept_a_id=5, concept_b_id=3, relation_text="related")
     assert conn.concept_a_id == 3
     assert conn.concept_b_id == 5
 
 
 def test_connection_keeps_sorted_order() -> None:
-    conn = Connection(concept_a_id=2, concept_b_id=4, relation_text="关联")
+    conn = Connection(concept_a_id=2, concept_b_id=4, relation_text="related")
     assert (conn.concept_a_id, conn.concept_b_id) == (2, 4)
 
 
 def test_connection_rejects_self_link() -> None:
     with pytest.raises(ValidationError):
-        Connection(concept_a_id=3, concept_b_id=3, relation_text="自连")
+        Connection(concept_a_id=3, concept_b_id=3, relation_text="self-link")
 
 
 def test_connection_requires_relation_text() -> None:
@@ -112,13 +112,13 @@ def test_connection_requires_relation_text() -> None:
 # ------------------------------------------------------------- DailySummary
 
 def test_daily_summary_date_defaults_to_today() -> None:
-    summary = DailySummary(breakthrough_text="我终于搞懂了")
+    summary = DailySummary(breakthrough_text="I finally understood")
     assert summary.date == date.today()
 
 
 def test_daily_summary_parses_date_string() -> None:
     summary = DailySummary.model_validate(
-        {"date": "2026-08-02", "breakthrough_text": "懂了"}
+        {"date": "2026-08-02", "breakthrough_text": "understood"}
     )
     assert summary.date == date(2026, 8, 2)
 

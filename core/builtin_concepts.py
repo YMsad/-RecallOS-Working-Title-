@@ -10,78 +10,97 @@ from __future__ import annotations
 BUILTIN_CONCEPTS: list[dict] = [
     {
         "id": "opportunity_cost",
-        "title": "机会成本",
-        "category": "经济学",
+        "title": "Opportunity Cost",
+        "category": "Economics",
         "difficulty": 1,
-        "hook": "做一个选择，代价不是钱，而是被你放弃的那个选项。",
+        "hook": "Every choice has a price — and it's the option you gave up.",
         "source_text": (
-            "**机会成本**，是指当你做一个选择时，被你放弃掉的「最好」的那个选项所代表的价值。\n\n"
-            "**简单来说**：天下没有免费的选择，每一个决定背后，都有一个被放弃的未来。\n\n"
-            "**比如**：选了看剧，就没法同时读书；选了存钱，就暂时享受不到这笔钱带来的快乐。\n\n"
-            "**关键点**：真正聪明的决策，不只盯着「我得到什么」，还要看清「我为此放弃了什么」；"
-            "把放弃的最佳选项和眼前的选项放在一起比较，才能判断这个选择到底值不值。"
+            "**Opportunity cost** is the value of the best alternative you give up "
+            "when you make a choice.\n\n"
+            "**In plain words**: nothing is free — every decision hides a future you "
+            "decided not to take.\n\n"
+            "**For example**: watching TV means you can't read a book at the same time; "
+            "saving your money means delaying the joy that money could buy today.\n\n"
+            "**The key point**: smart decisions aren't only about what you gain — "
+            "they're also about what you give up. Compare your best alternative with "
+            "the choice in front of you, and only then judge whether it's worth it."
         ),
     },
     {
         "id": "compound_interest",
-        "title": "复利",
-        "category": "理财",
+        "title": "Compound Interest",
+        "category": "Personal Finance",
         "difficulty": 1,
-        "hook": "收益的收益，也一起来滚雪球。",
+        "hook": "Your returns earn returns — and the snowball grows on its own.",
         "source_text": (
-            "**复利**，指的是把上一期产生的收益也一并投入下一期继续产生收益，"
-            "让收益像「滚雪球」一样越滚越大。\n\n"
-            "**简单来说**：收益也能再生收益，复利是时间的朋友。\n\n"
-            "**比如**：银行存款的利息、基金的收益、一个技能的反复练习，都可能产生复利。\n\n"
-            "**关键点**：复利最关键的三个变量是本金、收益率和时间——本金小没关系，"
-            "收益率稳定很珍贵，而时间越早开始越好，因为复利的威力需要时间来放大。"
+            "**Compound interest** is when the interest you earn is reinvested so it "
+            "also earns interest, letting your money grow like a rolling snowball.\n\n"
+            "**In plain words**: earnings produce more earnings; compound interest is "
+            "a friend of time.\n\n"
+            "**For example**: the interest on a savings account, the gains on an index "
+            "fund, or the repeated practice of a skill can all compound.\n\n"
+            "**The key point**: the three variables that matter most are the principal, "
+            "the rate of return, and time. A small principal is fine, a steady return "
+            "is precious, and the earlier you start the better — because compounding "
+            "needs time to do its work."
         ),
     },
     {
         "id": "survivorship_bias",
-        "title": "幸存者偏差",
-        "category": "思维模型",
+        "title": "Survivorship Bias",
+        "category": "Mental Models",
         "difficulty": 2,
-        "hook": "你没看到的失败者，才是最重要的证据。",
+        "hook": "The failures you never see are the most important evidence.",
         "source_text": (
-            "**幸存者偏差**，是指我们只看到了「活下来」的对象，却忽略了那些「没能活下来」的，"
-            "于是得出偏颇的结论。\n\n"
-            "**比如**：大家都说创业成功后光鲜，却看不到大量失败的创业公司；"
-            "飞机设计师研究返航战机上的弹孔分布，差点把装甲加在能看到弹孔的地方，"
-            "而真正该加固的是没有弹孔的部位——被打中那里而坠毁的飞机，根本没机会回来说话。\n\n"
-            "**关键点**：做判断时要主动问一句——我看到的是全部样本吗？还是只有幸存者？"
-            "把没被看见的部分补回来，结论才靠谱。"
+            "**Survivorship bias** is the error of drawing conclusions from the "
+            "survivors only, while ignoring the ones that didn't make it — so the "
+            "conclusion ends up distorted.\n\n"
+            "**For example**: everyone hears about startups that succeed, but the "
+            "thousands that quietly fail are invisible. During WWII, engineers studied "
+            "the bullet holes on returning planes and almost added armor where the "
+            "holes were — the right place was where there were NO holes, because planes "
+            "hit there never made it back to tell their story.\n\n"
+            "**The key point**: before you make a judgment, ask yourself — am I seeing "
+            "the whole sample, or only the survivors? Fill in the invisible part, and "
+            "your conclusion becomes reliable."
         ),
     },
     {
         "id": "marginal_utility",
-        "title": "边际效用",
-        "category": "经济学",
+        "title": "Marginal Utility",
+        "category": "Economics",
         "difficulty": 2,
-        "hook": "吃第一碗面最香——每一单位的额外满足并不相同。",
+        "hook": "The first bowl of noodles is the most delicious — every extra unit satisfies less.",
         "source_text": (
-            "**边际效用**，指的是「每多消费一个单位」带来的额外满足感，"
-            "它通常随着数量的增加而递减。\n\n"
-            "**简单来说**：吃第一碗面最香，吃到第三碗就撑得难受。\n\n"
-            "**比如**：买第一件衣服很兴奋，买第十件就没感觉了——不是衣服不好，"
-            "而是每多一件的边际效用小了。\n\n"
-            "**关键点**：理性安排资源时，要把有限的时间、金钱分配到「边际效用最高」的地方——"
-            "同样的一小时，花在最缺的那件事上收获最大；永远看「再增加一点」的差别，而不是只看总量。"
+            "**Marginal utility** is the extra satisfaction you get from consuming one "
+            "more unit of something, and it usually decreases as the quantity grows.\n\n"
+            "**In plain words**: the first bowl of noodles tastes great; by the third "
+            "you're stuffed.\n\n"
+            "**For example**: the first shirt you buy excites you; the tenth doesn't — "
+            "not because the shirt is bad, but because each extra one has less marginal "
+            "value.\n\n"
+            "**The key point**: when allocating limited resources, put your time and "
+            "money where the marginal utility is highest — the same hour is worth more "
+            "when spent on what you lack most. Always look at the difference an "
+            "\"extra unit\" makes, not just the total."
         ),
     },
     {
         "id": "sunk_cost",
-        "title": "沉没成本",
-        "category": "思维模型",
+        "title": "Sunk Cost",
+        "category": "Mental Models",
         "difficulty": 1,
-        "hook": "已经花出去、再也拿不回来的，就别再绑住你。",
+        "hook": "Money already spent and unrecoverable shouldn't keep calling the shots.",
         "source_text": (
-            "**沉没成本**，是指已经花出去、再也拿不回来的时间、金钱或精力。\n\n"
-            "**比如**：已经付掉的学费、已经谈了很久的恋爱、已经投进去的项目。\n\n"
-            "**关键点**：它最容易让人犯的错误是「舍不得」——因为是花钱买的电影票，"
-            "再难看的电影也要硬着头皮看完。理性的做法是：过去收不回的就让它过去，"
-            "做决定时只看「现在和未来」的代价与收益，不再被已经沉没的成本绑架；"
-            "及时止损，本身也是一种收益。"
+            "**Sunk cost** is time, money, or effort already spent that can never be "
+            "recovered.\n\n"
+            "**For example**: tuition already paid, a relationship you've invested "
+            "years in, or a project you've poured resources into.\n\n"
+            "**The key point**: it triggers the mistake of \"can't let it go\" — you "
+            "sit through a terrible movie just because you paid for the ticket. The "
+            "rational move: what's past is past; make decisions based on the costs and "
+            "benefits of the present and future, and stop letting unrecoverable costs "
+            "hold you hostage. Cutting your losses is itself a gain."
         ),
     },
 ]

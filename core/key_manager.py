@@ -52,7 +52,7 @@ class KeyManager:
     ) -> None:
         self.worker_url = (worker_url or "").rstrip("/")
         if not self.worker_url:
-            raise KeyManagerError("未配置 RECALLOS_WORKER_URL")
+            raise KeyManagerError("RECALLOS_WORKER_URL is not configured")
         self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
         self.cache_file = self.cache_dir / "key_cache.json"
         self.usage_log_file = self.cache_dir / "usage.log"
@@ -80,7 +80,7 @@ class KeyManager:
         cached = self._load_cache()
         if cached and self._cache_valid(cached):
             logger.info(
-                "使用缓存的临时 Key（剩余 %ds）",
+                "using cached temporary key (expires in %ds)",
                 int(cached["expires_at"] - time.time()),
             )
             return cached["api_key"]
@@ -97,12 +97,12 @@ class KeyManager:
                 "/revoke", params={"secret": admin_secret}
             )
         except httpx.TimeoutException as exc:
-            raise KeyManagerError(f"撤销请求超时：{exc}") from exc
+            raise KeyManagerError(f"Revoke request timed out: {exc}") from exc
         except httpx.TransportError as exc:
-            raise KeyManagerError(f"无法连接 Key 服务器：{exc}") from exc
+            raise KeyManagerError(f"Cannot reach the key server: {exc}") from exc
         if response.status_code != 200:
             raise KeyManagerError(
-                f"撤销失败（HTTP {response.status_code}）：{self._extract_error(response)}"
+                f"Revoke failed (HTTP {response.status_code}): {self._extract_error(response)}"
             )
         return response.json()
 
@@ -112,24 +112,24 @@ class KeyManager:
         try:
             response = self._client.get("/get-key", params={"device": self.device_id})
         except httpx.TimeoutException as exc:
-            raise KeyManagerError(f"获取 Key 超时：{exc}") from exc
+            raise KeyManagerError(f"Fetching key timed out: {exc}") from exc
         except httpx.TransportError as exc:
-            raise KeyManagerError(f"无法连接 Key 服务器：{exc}") from exc
+            raise KeyManagerError(f"Cannot reach the key server: {exc}") from exc
 
         if response.status_code == 429:
             raise DailyLimitExceeded(
-                self._extract_error(response) or "今日额度已用尽，明天再来吧"
+                self._extract_error(response) or "Daily quota exhausted — come back tomorrow"
             )
         if response.status_code != 200:
             raise KeyManagerError(
-                f"Key 服务器返回 {response.status_code}：{self._extract_error(response)}"
+                f"Key server returned {response.status_code}: {self._extract_error(response)}"
             )
         try:
             data = response.json()
         except ValueError as exc:
-            raise KeyManagerError(f"Key 服务器返回非 JSON：{exc}") from exc
+            raise KeyManagerError(f"Key server returned non-JSON: {exc}") from exc
         if not isinstance(data, dict) or not data.get("apiKey"):
-            raise KeyManagerError("Key 服务器未返回 apiKey")
+            raise KeyManagerError("Key server did not return an apiKey")
         return data
 
     def _cache_valid(self, cached: dict[str, Any]) -> bool:
@@ -159,7 +159,7 @@ class KeyManager:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
         except OSError as exc:
-            logger.warning("写入 Key 缓存失败：%s", exc)
+            logger.warning("failed to write key cache: %s", exc)
 
     def _log_usage(self, daily_used: int | None) -> None:
         """记录一次取 Key（用于本地用量监控，永远不抛错）。"""
@@ -173,7 +173,7 @@ class KeyManager:
             with open(self.usage_log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as exc:
-            logger.warning("写入用量日志失败：%s", exc)
+            logger.warning("failed to write usage log: %s", exc)
 
     @staticmethod
     def _extract_error(response: httpx.Response) -> str:

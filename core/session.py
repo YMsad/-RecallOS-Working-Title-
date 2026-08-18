@@ -74,10 +74,10 @@ VALIDATION_MAX_ATTEMPTS = 3
 
 # V0.3.1 — 用户信号输入
 LEARNING_GOALS = {
-    "understand": "🧠 理解概念",
-    "connect": "🔗 建立联系",
-    "apply": "🛠 能实际应用",
-    "exam": "🎓 为考试掌握",
+    "understand": "🧠 Understand the concept",
+    "connect": "🔗 Make connections",
+    "apply": "🛠 Apply it in practice",
+    "exam": "🎓 Master it for exams",
 }
 CONFIDENCE_PROMPT_RATE = 0.3  # 验证前偶尔让用户预测一次能否解释清楚
 
@@ -334,7 +334,7 @@ class LearningSession:
             self.phase = "connections"
             # V0.2.3 — 学习完成即加入复习队列（无论是否走完总结等后续流程）
             add_to_review_queue(cid)
-            logger.info("概念已加入复习队列: %s", cid)
+            logger.info("concept added to review queue: %s", cid)
         result["is_done"] = self.phase != "learning"
         return result
 
@@ -478,7 +478,7 @@ class LearningSession:
         """
         cid = self._require_started()
         logger.info(
-            "[DEBUG] start_validation 开始：concept=%s id=%s",
+            "[DEBUG] start_validation begin: concept=%s id=%s",
             self.title,
             cid,
         )
@@ -488,9 +488,9 @@ class LearningSession:
             text_type=self.text_type or "",
             reading_answers=self._reading_answers_context(),
         )
-        reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "设计验证任务")
-        task = self._parse_or_raise(reply, ValidationTask, "验证任务")
-        logger.info("[DEBUG] 验证任务设计完成：task=%r", task.task)
+        reply = self._chat_or_raise(prompt, OTHER_TEMPERATURE, "design check task")
+        task = self._parse_or_raise(reply, ValidationTask, "check task")
+        logger.info("[DEBUG] check task designed: task=%r", task.task)
         self.validation_task = task.task
         self.validation_kind = task.type
         self.validation_difficulty = task.difficulty
@@ -524,7 +524,7 @@ class LearningSession:
         position = int(position)
         self.reading_signals.append({"kind": kind, "position": position})
         if kind == "confused":
-            note = f"阅读原文第 {position + 1} 段时用户标了「没看懂」"
+            note = f"The learner marked paragraph {position + 1} as \"didn't get it\" while reading"
             if note not in self.stuck_points:
                 self.stuck_points.append(note)
             if note not in self.learner_state.uncertain:
@@ -712,8 +712,9 @@ class LearningSession:
                 final_intervention={
                     "action": "none",
                     "content": (
-                        f"你的理解已经到位（层级："
-                        f"{self.learner_state.understanding_level}），可以放心记下了。"
+                        f"Your understanding is solid (level: "
+                        f"{self.learner_state.understanding_level}) — you can confidently "
+                        f"write it down."
                     ),
                 }
             )
@@ -741,7 +742,7 @@ class LearningSession:
                 explanation=self._last_explanation or "",
             ),
             OTHER_TEMPERATURE,
-            "大白话解释",
+            "plain-language explanation",
         )
         self._last_explanation = reply.strip()
         logger.info("Simplified explanation given for concept %s (id=%s)", self.title, cid)
@@ -772,7 +773,7 @@ class LearningSession:
                 qa_history=self._format_history(),
             ),
             QUESTION_TEMPERATURE,
-            "生成深化追问",
+            "generate deeper question",
         )
         question = reply.strip()
         self.deeper_questions.append(question)
@@ -828,9 +829,9 @@ class LearningSession:
         self.stage = "complete"
         self.validation_history.append(
             {
-                "answer": "(由用户选择跳过，未经过 AI 判断)",
+                "answer": "(skipped by the user, not judged by AI)",
                 "passed": True,
-                "feedback": "用户手动跳过（AI 不可用）",
+                "feedback": "user manually skipped (AI unavailable)",
                 "missing": "",
             }
         )
@@ -869,9 +870,9 @@ class LearningSession:
                 understanding_level=self.learner_state.understanding_level,
             ),
             OTHER_TEMPERATURE,
-            "深化邀请",
+            "deepening offer",
         )
-        offer = self._parse_or_raise(reply, DeepeningOffer, "深化邀请")
+        offer = self._parse_or_raise(reply, DeepeningOffer, "deepening offer")
         self._offer = {
             "offer": offer.offer,
             "options": [str(o) for o in offer.options],
@@ -951,7 +952,9 @@ class LearningSession:
             return self._finish_new_flow(
                 final_intervention={
                     "action": "none",
-                    "content": "连续两次提示都没能让这一步的理解明显进步。先把当前的理解记下来，明天复习时我们再从这块接着推进。",
+                    "content": "Two hints in a row didn't clearly move this forward. "
+                    "Let's write down what you have now — tomorrow's review can pick "
+                    "up right here.",
                 }
             )
 
@@ -1020,7 +1023,7 @@ class LearningSession:
                         concept_title=self.title,
                         user_answer=answer,
                         task_description=self.validation_task
-                        or "用自己的话解释这个概念",
+                        or "explain this concept in your own words",
                         reading_answers=self.reading_answers or None,
                     )
                 ),
@@ -1042,15 +1045,15 @@ class LearningSession:
         ls = self.learner_state
         notes: list[str] = []
         if ls.misconceptions:
-            notes.append(f"**可能需要调整：**\n- " + "\n- ".join(ls.misconceptions))
+            notes.append(f"**Might need adjusting:**\n- " + "\n- ".join(ls.misconceptions))
         if ls.uncertain:
-            notes.append(f"**还没完全说清：**\n- " + "\n- ".join(ls.uncertain))
+            notes.append(f"**Not quite there yet:**\n- " + "\n- ".join(ls.uncertain))
         if not notes:
-            notes.append("我们已经接近目标了，再往前一步就能完全掌握。")
+            notes.append("We're close — one more step and it will fully click.")
         return (
-            f"**你的回答提到了：**\n{answer.strip() or '（没有留下具体内容）'}\n\n"
+            f"**Your answer covered:**\n{answer.strip() or '(no specifics left)'}\n\n"
             + "\n\n".join(notes)
-            + "\n\n我们再看一个更具体的例子，把最后一环补上。"
+            + "\n\nLet's look at one more concrete example to close the last gap."
         )
 
     def _analyze_learner(self, answer: str) -> LearnerStateAnalysis:
@@ -1067,7 +1070,7 @@ class LearningSession:
             learner_state_analyzer_prompt(
                 source_text=self.source_text,
                 concept=self.title,
-                task=self.validation_task or "用自己的话解释这个概念",
+                task=self.validation_task or "explain this concept in your own words",
                 user_answer=answer,
                 context=self._format_learner_context(),
                 learning_goal=self.learning_goal,
@@ -1075,10 +1078,10 @@ class LearningSession:
                 confidence_prediction=str(last_confidence),
             ),
             JUDGE_TEMPERATURE,
-            "分析学习者状态",
+            "analyze learner state",
         )
-        print(f"[RecallOS][_analyze_learner] AI原始回复(前500字符)：{reply[:500]!r}", flush=True)
-        analysis = self._parse_or_raise(reply, LearnerStateAnalysis, "学习者状态分析")
+        print(f"[RecallOS][_analyze_learner] raw AI reply (first 500 chars): {reply[:500]!r}", flush=True)
+        analysis = self._parse_or_raise(reply, LearnerStateAnalysis, "learner state analysis")
         self.learner_state.update_from_analysis(analysis.model_dump())
         for sp in self.stuck_points:  # 保留用户自述的卡住点
             if sp not in self.learner_state.uncertain:
@@ -1101,9 +1104,9 @@ class LearningSession:
                 learning_goal=self.learning_goal,
             ),
             JUDGE_TEMPERATURE,
-            "更新学习者状态",
+            "update learner state",
         )
-        update = self._parse_or_raise(reply, LearnerStateUpdate, "学习者状态更新")
+        update = self._parse_or_raise(reply, LearnerStateUpdate, "learner state update")
         self.learner_state.update_from_analysis(update.model_dump())
         return update
 
@@ -1128,7 +1131,7 @@ class LearningSession:
                 learner_state=json.dumps(
                     self.learner_state.to_dict(), ensure_ascii=False
                 ),
-                current_target=self.validation_task or "用自己的话解释这个概念",
+                current_target=self.validation_task or "explain this concept in your own words",
                 mode=mode,
                 context=self._format_learner_context(),
                 intervention_history=json.dumps(
@@ -1143,9 +1146,9 @@ class LearningSession:
                 answer_richness=self._calculate_answer_richness(self._last_user_answer()),
             ),
             QUESTION_TEMPERATURE,
-            "决定最小干预",
+            "decide minimal intervention",
         )
-        inter = self._parse_or_raise(reply, Intervention, "干预决策")
+        inter = self._parse_or_raise(reply, Intervention, "intervention decision")
         # 强制优先级：AI 违抗时硬性抬到最低允许级别（none 也会被迫升级，
         # 保证「无效→升级」闭环真正收敛，而不是提前放弃）
         if minimum_action:
@@ -1209,7 +1212,10 @@ class LearningSession:
 
     @staticmethod
     def _has_example(text: str) -> bool:
-        return any(k in text for k in ("比如", "例如", "比方", "举个例子", "打个比方"))
+        return any(
+            k in text
+            for k in ("for example", "for instance", "e.g.", "such as", "like")
+        )
 
     def _last_user_answer(self) -> str:
         """最近一次用户输出（验证回答或干预回答），供丰富度分级使用。"""
@@ -1227,11 +1233,11 @@ class LearningSession:
             lines.append(f"   A: {qa['answer']}")
         for i, v in enumerate(self.validation_history, 1):
             lines.append(
-                f"验证{i}: {v['answer']}（层级 {v.get('understanding_level')}）"
+                f"Validation {i}: {v['answer']} (level {v.get('understanding_level')})"
             )
         for i, d in enumerate(self.deeper_history, 1):
             lines.append(
-                f"干预{i}: {d['question']} → {d['answer']}（层级 {d.get('understanding_level')}）"
+                f"Intervention {i}: {d['question']} → {d['answer']} (level {d.get('understanding_level')})"
             )
         return "\n".join(lines)
 
@@ -1244,17 +1250,17 @@ class LearningSession:
         cid = self._require_started()
         snippet = " ".join(prompt.split())[:60]
         logger.info(
-            "AI 调用开始[%s]: concept=%s id=%s 提问=%r", what, self.title, cid, snippet
+            "AI call started[%s]: concept=%s id=%s prompt=%r", what, self.title, cid, snippet
         )
         try:
             reply = self.client.chat(build_messages(prompt), temperature=temperature)
         except DeepSeekError as exc:
             logger.error(
-                "AI 调用失败[%s]: concept=%s id=%s —— %s", what, self.title, cid, exc
+                "AI call failed[%s]: concept=%s id=%s - %s", what, self.title, cid, exc
             )
             raise
         logger.info(
-            "AI 调用完成[%s]: concept=%s id=%s 回复长度=%d",
+            "AI call done[%s]: concept=%s id=%s reply_length=%d",
             what,
             self.title,
             cid,
@@ -1272,12 +1278,14 @@ class LearningSession:
             return validate_response(reply, model)
         except (ValueError, ValidationError) as exc:
             logger.error(
-                "AI 返回解析失败[%s]: %s —— 回复前 200 字=%r",
+                "AI reply parsing failed[%s]: %s - first 200 chars=%r",
                 what,
                 exc,
                 reply[:200],
             )
-            raise SessionError(f"AI 返回的「{what}」格式不正确，请重试。") from exc
+            raise SessionError(
+                f"The AI's \"{what}\" response was not in the expected format. Please retry."
+            ) from exc
 
     # --------------------------------------------------------------- internals
 
@@ -1463,9 +1471,9 @@ class LearningSession:
             return ""
         lines: list[str] = []
         for i, qa in enumerate(self.qa_history, 1):
-            hint = f"（提示：{qa['hint']}）" if qa.get("hint") else ""
-            lines.append(f"{i}. 问题：{qa['question']}")
-            lines.append(f"   回答：{qa['answer']}{hint}")
+            hint = f" (hint: {qa['hint']})" if qa.get("hint") else ""
+            lines.append(f"{i}. Q: {qa['question']}")
+            lines.append(f"   A: {qa['answer']}{hint}")
         return "\n".join(lines)
 
     def _format_new_flow_history(self) -> str:
@@ -1474,11 +1482,11 @@ class LearningSession:
         for v in self.validation_history:
             ans = v.get("answer")
             if ans:
-                lines.append(f"验证回答：{ans}")
+                lines.append(f"Validation answer: {ans}")
         for d in self.deeper_history:
             if d.get("question") and d.get("answer"):
-                lines.append(f"追问：{d['question']}")
-                lines.append(f"回答：{d['answer']}")
+                lines.append(f"Follow-up Q: {d['question']}")
+                lines.append(f"Follow-up A: {d['answer']}")
         return "\n".join(lines)
 
 

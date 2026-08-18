@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     title TEXT NOT NULL,
     user_definition TEXT,
     source_text TEXT,
-    mastery TEXT NOT NULL DEFAULT '学习中',
+    mastery TEXT NOT NULL DEFAULT 'Learning',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     next_review_date DATE,

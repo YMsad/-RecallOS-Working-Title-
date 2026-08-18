@@ -44,15 +44,15 @@ from core import (
 # ---------------------------------------------------------------- question
 
 def test_question_prompt_contains_context_and_guide() -> None:
-    prompt = question_prompt(1, title="机会成本", source_text="原文……")
-    assert "机会成本" in prompt
-    assert "原文……" in prompt
-    assert "第一层追问" in prompt
+    prompt = question_prompt(1, title="opportunity cost", source_text="Original text...")
+    assert "opportunity cost" in prompt
+    assert "Original text..." in prompt
+    assert "Layer 1" in prompt
 
 
 @pytest.mark.parametrize(
     ("layer", "marker"),
-    [(1, "第一层追问"), (2, "第二层追问"), (3, "第三层追问"), (4, "第四层追问")],
+    [(1, "Layer 1"), (2, "Layer 2"), (3, "Layer 3"), (4, "Layer 4")],
 )
 def test_question_prompt_all_layers(layer: int, marker: str) -> None:
     prompt = question_prompt(layer, title="X", source_text="Y")
@@ -61,22 +61,22 @@ def test_question_prompt_all_layers(layer: int, marker: str) -> None:
 
 def test_question_prompt_layer4_includes_related_concepts() -> None:
     prompt = question_prompt(
-        4, title="机会成本", source_text="Y", related_concepts=["沉没成本", "边际效用"]
+        4, title="opportunity cost", source_text="Y", related_concepts=["sunk cost", "marginal utility"]
     )
-    assert "沉没成本" in prompt
-    assert "边际效用" in prompt
+    assert "sunk cost" in prompt
+    assert "marginal utility" in prompt
 
 
 def test_question_prompt_layer4_without_related_falls_back() -> None:
-    prompt = question_prompt(4, title="机会成本", source_text="Y")
-    assert "你之前学过的其他概念" in prompt
+    prompt = question_prompt(4, title="opportunity cost", source_text="Y")
+    assert "other concepts you've learned before" in prompt
 
 
 def test_question_prompt_includes_qa_history_when_given() -> None:
     prompt = question_prompt(
-        2, title="X", source_text="Y", qa_history="A1: 答1\nA2: 答2"
+        2, title="X", source_text="Y", qa_history="A1: Answer 1\nA2: Answer 2"
     )
-    assert "回答历史" in prompt
+    assert "The learner's previous answers" in prompt
 
 
 def test_question_prompt_invalid_layer_rejected() -> None:
@@ -92,16 +92,16 @@ def test_question_prompt_is_plain_text_not_json() -> None:
 @pytest.mark.parametrize(
     ("model", "marker"),
     [
-        ("golden_circle", "黄金圈法则"),
-        ("scenario", "场景化提问"),
-        ("analogy", "结构性类比"),
-        ("first_principles", "第一性原理"),
+        ("golden_circle", "Golden Circle"),
+        ("scenario", "Scenario-based questioning"),
+        ("analogy", "Structural analogy"),
+        ("first_principles", "First principles"),
     ],
 )
 def test_question_prompt_with_thinking_model(model: str, marker: str) -> None:
     prompt = question_prompt(1, title="X", source_text="Y", model=model)
     assert marker in prompt
-    assert "思维模型" in prompt
+    assert "Thinking model" in prompt
 
 
 def test_question_prompt_invalid_model_rejected() -> None:
@@ -111,19 +111,19 @@ def test_question_prompt_invalid_model_rejected() -> None:
 
 def test_question_prompt_with_cognitive_contrast() -> None:
     prompt = question_prompt(
-        2, title="机会成本", source_text="Y", cognitive_contrast=True
+        2, title="opportunity cost", source_text="Y", cognitive_contrast=True
     )
-    assert "认知反差" in prompt
-    assert "误解" in prompt
-    plain = question_prompt(2, title="机会成本", source_text="Y")
-    assert "认知反差" not in plain
+    assert "Cognitive contrast" in prompt
+    assert "misunderstand" in prompt
+    plain = question_prompt(2, title="opportunity cost", source_text="Y")
+    assert "Cognitive contrast" not in plain
 
 
 def test_warmup_prompt_is_plain_text_with_title() -> None:
-    prompt = warmup_prompt(title="机会成本", source_text="原文……")
-    assert "机会成本" in prompt
-    assert "预热" in prompt
-    assert "用一句话说" in prompt
+    prompt = warmup_prompt(title="opportunity cost", source_text="Original text...")
+    assert "opportunity cost" in prompt
+    assert "warm-up" in prompt
+    assert "In one sentence" in prompt
     assert '{"' not in prompt
 
 
@@ -131,24 +131,24 @@ def test_warmup_prompt_is_plain_text_with_title() -> None:
 
 def test_check_answer_prompt_requests_json() -> None:
     prompt = check_answer_prompt(
-        title="机会成本", source_text="S", question="Q?", answer="A"
+        title="opportunity cost", source_text="S", question="Q?", answer="A"
     )
     assert "is_correct" in prompt
-    assert '{"is_correct": true或false' in prompt
+    assert '{"is_correct": true or false' in prompt
 
 
 def test_summary_prompt_requests_json() -> None:
-    prompt = summary_prompt(title="机会成本", user_definition="U", qa_history="H")
+    prompt = summary_prompt(title="opportunity cost", user_definition="U", qa_history="H")
     assert "breakthrough" in prompt
     assert "tomorrow_hook" in prompt
 
 
 def test_connections_prompt_lists_concepts() -> None:
     prompt = connections_prompt(
-        title="机会成本", source_text="S", all_concepts=["沉没成本", "边际效用"]
+        title="opportunity cost", source_text="S", all_concepts=["sunk cost", "marginal utility"]
     )
-    assert "- 沉没成本" in prompt
-    assert "- 边际效用" in prompt
+    assert "- sunk cost" in prompt
+    assert "- marginal utility" in prompt
     assert "concept_title" in prompt
 
 
@@ -163,12 +163,12 @@ def test_build_messages_has_system_and_user() -> None:
 # --------------------------------------------------------------- JSON parsing
 
 def test_parse_json_response_with_fences() -> None:
-    text = '```json\n{"is_correct": true, "feedback": "对"}\n```'
-    assert parse_json_response(text) == {"is_correct": True, "feedback": "对"}
+    text = '```json\n{"is_correct": true, "feedback": "Correct"}\n```'
+    assert parse_json_response(text) == {"is_correct": True, "feedback": "Correct"}
 
 
 def test_parse_json_response_with_surrounding_text() -> None:
-    text = '好的，结果如下：\n[{"concept_title": "A", "relation_text": "R"}]\n完毕'
+    text = 'OK, here is the result:\n[{"concept_title": "A", "relation_text": "R"}]\nDone'
     assert parse_json_response(text) == [
         {"concept_title": "A", "relation_text": "R"}
     ]
@@ -176,7 +176,7 @@ def test_parse_json_response_with_surrounding_text() -> None:
 
 def test_parse_json_response_no_json_raises() -> None:
     with pytest.raises(ValueError):
-        parse_json_response("没有任何 JSON")
+        parse_json_response("there is no JSON here")
 
 
 def test_parse_json_response_invalid_json_raises() -> None:
@@ -186,26 +186,26 @@ def test_parse_json_response_invalid_json_raises() -> None:
 
 def test_validate_response_ok() -> None:
     result = validate_response(
-        '{"is_correct": true, "feedback": "很好", "hint": null}',
+        '{"is_correct": true, "feedback": "Great", "hint": null}',
         CheckAnswerResult,
     )
     assert result.is_correct is True
-    assert result.feedback == "很好"
+    assert result.feedback == "Great"
     assert result.hint is None
 
 
 def test_validate_response_rejects_bad_structure() -> None:
     with pytest.raises(ValidationError):
-        validate_response('{"feedback": "缺 is_correct"}', CheckAnswerResult)
+        validate_response('{"feedback": "missing is_correct"}', CheckAnswerResult)
 
 
 def test_validate_response_list() -> None:
     suggestions = validate_response_list(
-        '[{"concept_title": "沉没成本", "relation_text": "都关于选择"},'
-        '{"concept_title": "边际效用", "relation_text": "都关于价值"}]',
+        '[{"concept_title": "sunk cost", "relation_text": "both about choice"},'
+        '{"concept_title": "marginal utility", "relation_text": "both about value"}]',
         ConnectionSuggestion,
     )
-    assert [s.concept_title for s in suggestions] == ["沉没成本", "边际效用"]
+    assert [s.concept_title for s in suggestions] == ["sunk cost", "marginal utility"]
 
 
 def test_validate_response_list_rejects_non_array() -> None:
@@ -215,18 +215,18 @@ def test_validate_response_list_rejects_non_array() -> None:
 
 def test_summary_result_model() -> None:
     result = SummaryResult(
-        breakthrough="我终于搞懂了机会成本",
-        tomorrow_hook="边际效用和机会成本有什么关系？",
+        breakthrough="I finally understood opportunity cost",
+        tomorrow_hook="What is the relationship between marginal utility and opportunity cost?",
     )
-    assert result.tomorrow_hook.startswith("边际效用")
+    assert result.tomorrow_hook.startswith("What is the relationship")
 
 
 # --------------------------------------------------------- V0.3.0 new prompts
 
 
 def test_detect_text_type_prompt_requests_json() -> None:
-    prompt = detect_text_type_prompt(raw_text="机会成本是指在决策中放弃的次优选择")
-    assert "粘贴的材料原文" in prompt
+    prompt = detect_text_type_prompt(raw_text="Opportunity cost is the second-best choice given up in a decision")
+    assert "Pasted material" in prompt
     assert "text_type" in prompt
     assert "title_hint" in prompt
     assert '"reason"' in prompt
@@ -234,35 +234,35 @@ def test_detect_text_type_prompt_requests_json() -> None:
 
 def test_detect_text_type_result_validates() -> None:
     result = validate_response(
-        '{"text_type": "concept", "title_hint": "机会成本", "reason": null}',
+        '{"text_type": "concept", "title_hint": "opportunity cost", "reason": null}',
         TextTypeResult,
     )
     assert result.text_type == "concept"
-    assert result.title_hint == "机会成本"
+    assert result.title_hint == "opportunity cost"
     assert result.reason is None
 
 
 def test_validation_task_prompt_requests_json() -> None:
-    prompt = validation_task_prompt(source_text="S", concept="机会成本")
-    assert "验证任务" in prompt or "验证" in prompt
+    prompt = validation_task_prompt(source_text="S", concept="opportunity cost")
+    assert "validation task" in prompt or "validation" in prompt
     assert '"task"' in prompt
     assert '"type"' in prompt
     assert '"difficulty"' in prompt
-    assert "机会成本" in prompt
+    assert "opportunity cost" in prompt
 
 
 def test_validation_task_prompt_uses_text_type() -> None:
-    prompt = validation_task_prompt(source_text="S", concept="机会成本", text_type="concept")
+    prompt = validation_task_prompt(source_text="S", concept="opportunity cost", text_type="concept")
     assert "concept" in prompt
     assert "text_type" in prompt
 
 
 def test_validation_task_validates() -> None:
     result = validate_response(
-        '{"task": "用自己的话解释", "type": "summary", "difficulty": 2}',
+        '{"task": "explain in your own words", "type": "summary", "difficulty": 2}',
         ValidationTask,
     )
-    assert result.task == "用自己的话解释"
+    assert result.task == "explain in your own words"
     assert result.type == "summary"
     assert result.difficulty == 2
 
@@ -278,9 +278,9 @@ def test_validation_task_difficulty_bounds() -> None:
 
 def test_legacy_validate_answer_prompt_requests_json() -> None:
     prompt = _legacy_validate_answer_prompt(
-        title="机会成本", task="用一句话解释", target="关键点", answer="回答"
+        title="opportunity cost", task="explain in one sentence", target="key points", answer="Answer"
     )
-    assert "验证任务" in prompt
+    assert "validation task" in prompt
     assert "is_correct" in prompt
     assert '"missing"' in prompt
 
@@ -288,17 +288,17 @@ def test_legacy_validate_answer_prompt_requests_json() -> None:
 def test_legacy_validation_task_prompt_requests_json() -> None:
     from core import _legacy_validation_task_prompt
 
-    prompt = _legacy_validation_task_prompt(title="机会成本", source_text="S", qa_history="H")
-    assert "验证任务" in prompt
+    prompt = _legacy_validation_task_prompt(title="opportunity cost", source_text="S", qa_history="H")
+    assert "validation task" in prompt
     assert '"task"' in prompt
     assert '"target"' in prompt
 
 
 def test_learner_state_analyzer_prompt_requests_json() -> None:
     prompt = learner_state_analyzer_prompt(
-        source_text="S", concept="机会成本", task="T", user_answer="A"
+        source_text="S", concept="opportunity cost", task="T", user_answer="A"
     )
-    assert "学习者状态分析器" in prompt
+    assert "learner-state analyzer" in prompt
     assert '"understanding_level"' in prompt
     assert '"understood"' in prompt
     assert '"uncertain"' in prompt
@@ -308,144 +308,144 @@ def test_learner_state_analyzer_prompt_requests_json() -> None:
 
 def test_learner_state_analyzer_prompt_includes_context_when_given() -> None:
     prompt = learner_state_analyzer_prompt(
-        source_text="S", concept="机会成本", task="T", user_answer="A", context="此前对话"
+        source_text="S", concept="opportunity cost", task="T", user_answer="A", context="previous conversation"
     )
-    assert "此前对话" in prompt
+    assert "Previous conversation" in prompt
 
 
 def test_analyzer_prompt_includes_user_signals() -> None:
-    """V0.3.1 — 分析器携带学习目标 / 卡住点 / 信心预测。"""
+    """V0.3.1 — the analyzer carries the learning goal / stuck points / confidence prediction."""
     prompt = learner_state_analyzer_prompt(
         source_text="S",
-        concept="机会成本",
+        concept="opportunity cost",
         task="T",
         user_answer="A",
         learning_goal="apply",
-        stuck_points="机会成本只算最优那一个吗",
-        confidence_prediction="😊 应该可以讲清楚",
+        stuck_points="does opportunity cost only count the best option?",
+        confidence_prediction="😊 I think I can explain it clearly",
     )
-    assert "能实际应用" in prompt  # apply 的目标提示
-    assert "机会成本只算最优那一个吗" in prompt
-    assert "😊 应该可以讲清楚" in prompt
+    assert "apply it in practice" in prompt  # apply goal hint
+    assert "does opportunity cost only count the best option?" in prompt
+    assert "😊 I think I can explain it clearly" in prompt
 
     plain = learner_state_analyzer_prompt(
         source_text="S", concept="X", task="T", user_answer="A"
     )
-    assert "能实际应用" not in plain  # 默认 understand，不给 apply 目标
-    assert "目标：理解概念本身" in plain
+    assert "apply it in practice" not in plain  # default understand, no apply goal
+    assert "Goal: understand the concept itself" in plain
 
 
 def test_validation_feedback_prompt_is_concrete_and_contrastive() -> None:
-    """V0.3.1 hotfix — 反馈必须是具体、有对比、可行动的，禁止只说「理解不到位」。"""
+    """V0.3.1 hotfix — feedback must be specific, comparative and actionable, not a bare "not quite there"."""
     prompt = validation_feedback_prompt(
-        concept_title="机会成本",
-        user_answer="它可以帮助决策",
-        task_description="用自己的话解释机会成本",
+        concept_title="opportunity cost",
+        user_answer="It helps with decision-making",
+        task_description="Explain opportunity cost in your own words",
         reading_answers=[
-            {"paragraph_index": 0, "answer": "机会成本是放弃的选项"}
+            {"paragraph_index": 0, "answer": "Opportunity cost is the option you give up"}
         ],
     )
-    assert "苏格拉底式导师" in prompt
-    assert "机会成本" in prompt
-    assert "它可以帮助决策" in prompt
-    assert "机会成本是放弃的选项" in prompt  # 阅读答案进上下文
-    # 结构强制项：对比 / 例子 / 为什么
-    assert "你的回答提到了" in prompt
-    assert "但机会成本的核心在于" in prompt
-    assert "对比" in prompt
-    assert "试着想想这个例子" in prompt
-    assert "总结用户的理解程度" in prompt
-    assert "不要只说「理解不到位」" in prompt
+    assert "Socratic mentor" in prompt
+    assert "opportunity cost" in prompt
+    assert "It helps with decision-making" in prompt
+    assert "Opportunity cost is the option you give up" in prompt  # reading answers in context
+    # structural requirements: compare / example / why
+    assert "Your answer mentioned" in prompt
+    assert "But the core of opportunity cost is" in prompt
+    assert "Compare:" in prompt
+    assert "Try this example:" in prompt
+    assert "summarize how well they understand" in prompt
+    assert 'Never just say "not quite there"' in prompt
 
 
 def test_validation_feedback_prompt_optional_reading_answers() -> None:
     prompt = validation_feedback_prompt(
-        concept_title="复利",
-        user_answer="利滚利",
-        task_description="解释复利",
+        concept_title="compound interest",
+        user_answer="interest on interest",
+        task_description="Explain compound interest",
     )
-    assert "用户的回答" in prompt and "利滚利" in prompt
-    assert "阅读时的理解" not in prompt  # 没有阅读答案时省略
+    assert "The learner's answer" in prompt and "interest on interest" in prompt
+    assert "The learner's understanding while reading" not in prompt  # omitted without reading answers
 
 
 def test_intervention_decider_prompt_includes_feedback_history() -> None:
-    """V0.3.1 — 决策器收到过往干预反馈。"""
+    """V0.3.1 — the decider receives feedback on past interventions."""
     prompt = intervention_decider_prompt(
         source_text="S",
-        concept="机会成本",
+        concept="opportunity cost",
         learner_state="{}",
         intervention_history='[{"action": "counterexample", "feedback": "unclear"}]',
     )
-    assert "用户对已给干预的反馈" in prompt
+    assert "The learner's feedback on the interventions given" in prompt
     assert '"action": "counterexample"' in prompt
     assert "unclear" in prompt
 
     plain = intervention_decider_prompt(
         source_text="S", concept="X", learner_state="{}"
     )
-    assert "用户对已给干预的反馈" not in plain
+    assert "The learner's feedback on the interventions given" not in plain
 
 
 def test_intervention_decider_forces_intensity_ladder() -> None:
-    """V0.3.0 patch 3 — 决策器 prompt 内置从低到高的强制干预阶梯。"""
+    """V0.3.0 patch 3 — the decider prompt embeds a forced low-to-high intervention ladder."""
     prompt = intervention_decider_prompt(
-        source_text="S", concept="机会成本", learner_state="{}"
+        source_text="S", concept="opportunity cost", learner_state="{}"
     )
-    assert "hint（一句话提示）→ example（具体例子）→ analogy（类比）→ counterexample（反例）→ question（直接提问）" in prompt
-    assert "只有当更低优先级的干预无效时，才能使用更高优先级的干预" in prompt
-    assert "上次干预未让用户进步" not in prompt  # 无最低级别时不加约束
+    assert "hint (one-line hint) → example (concrete example) → analogy (analogy) → counterexample (counterexample) → question (direct question)" in prompt
+    assert "Only escalate to a heavier intervention once the lighter one has failed." in prompt
+    assert "The last intervention did not help the learner progress" not in prompt  # no constraint without a floor
 
     escalated = intervention_decider_prompt(
         source_text="S",
-        concept="机会成本",
+        concept="opportunity cost",
         learner_state="{}",
         minimum_action="example",
     )
-    assert "上次干预未让用户进步" in escalated
-    assert "example（具体例子）" in escalated
-    assert "从这一级起步" in escalated
+    assert "The last intervention did not help the learner progress" in escalated
+    assert "example (concrete example)" in escalated
+    assert "start from this level" in escalated
 
 
 def test_intervention_decider_grades_question_by_answer_richness() -> None:
-    """V0.3.1 hotfix — 决策器收到用户回答的丰富度，追问必须匹配对应层级。"""
+    """V0.3.1 hotfix — the decider receives the answer richness and must push at the matching level."""
     prompt = intervention_decider_prompt(
         source_text="S",
-        concept="机会成本",
+        concept="opportunity cost",
         learner_state="{}",
         answer_richness="rich",
     )
-    assert "丰富度" in prompt
+    assert "Richness" in prompt
     assert "rich" in prompt
-    assert "反事实" in prompt  # rich → 反事实「如果没有它会怎样？」
-    assert "如果没有这个概念" in prompt
+    assert "Counterfactual" in prompt  # rich → counterfactual "what if it didn't exist?"
+    assert "what would happen if this concept didn't exist" in prompt
 
     simple = intervention_decider_prompt(
-        source_text="S", concept="机会成本", learner_state="{}", answer_richness="simple"
+        source_text="S", concept="opportunity cost", learner_state="{}", answer_richness="simple"
     )
-    assert "生活类比" in simple
-    assert "这就像什么" in simple
+    assert "Everyday analogy" in simple
+    assert "what is this like?" in simple
 
     plain = intervention_decider_prompt(
         source_text="S", concept="X", learner_state="{}"
     )
-    assert "丰富度" not in plain  # 未提供时不干扰默认决策
+    assert "Richness" not in plain  # not provided → doesn't distort the default decision
 
 
 def test_deepening_question_prompt_grades_by_level() -> None:
-    """V0.3.1 hotfix — deepening_question_prompt 按丰富度给出对应层次的追问模板。"""
-    simple = deepening_question_prompt(level="simple", concept="机会成本", source_text="原文")
-    assert "这就像什么" in simple
-    assert "生活类比" in simple
+    """V0.3.1 hotfix — deepening_question_prompt templates a follow-up by richness level."""
+    simple = deepening_question_prompt(level="simple", concept="opportunity cost", source_text="Original text")
+    assert "what is this like?" in simple
+    assert "Everyday analogy" in simple
 
-    moderate = deepening_question_prompt(level="moderate", concept="机会成本", source_text="原文")
-    assert "和什么有关" in moderate
+    moderate = deepening_question_prompt(level="moderate", concept="opportunity cost", source_text="Original text")
+    assert "what does this relate to?" in moderate
     assert DEEPENING_LEVEL_GUIDES["moderate"] in moderate
 
     rich = deepening_question_prompt(
-        level="rich", concept="机会成本", source_text="原文", qa_history="Q1→A1"
+        level="rich", concept="opportunity cost", source_text="Original text", qa_history="Q1→A1"
     )
-    assert "如果没有这个概念" in rich
-    assert "Q1→A1" in rich  # 历史回答进上下文
+    assert "what would happen if this concept didn't exist" in rich
+    assert "Q1→A1" in rich  # answer history in context
 
     with pytest.raises(ValueError):
         deepening_question_prompt(level="unknown", concept="X", source_text="Y")
@@ -453,68 +453,68 @@ def test_deepening_question_prompt_grades_by_level() -> None:
 
 def test_learner_state_analysis_validates() -> None:
     result = validate_response(
-        '{"understanding_level": "relationship", "understood": ["理解了关系"], '
+        '{"understanding_level": "relationship", "understood": ["understands the relationship"], '
         '"uncertain": [], "misconceptions": [], "last_response_quality": "partial"}',
         LearnerStateAnalysis,
     )
     assert result.understanding_level == "relationship"
-    assert result.understood == ["理解了关系"]
+    assert result.understood == ["understands the relationship"]
 
 
 def test_intervention_decider_prompt_requests_json() -> None:
     prompt = intervention_decider_prompt(
-        source_text="S", concept="机会成本", learner_state="{}"
+        source_text="S", concept="opportunity cost", learner_state="{}"
     )
-    assert "最小干预决策器" in prompt
+    assert "minimal-intervention decider" in prompt
     assert '"action"' in prompt
     assert '"content"' in prompt
     assert '"requires_user_response"' in prompt
-    assert "验证阶段" in prompt
+    assert "Current stage is validation" in prompt
     deepening = intervention_decider_prompt(
-        source_text="S", concept="机会成本", learner_state="{}", mode="deepening"
+        source_text="S", concept="opportunity cost", learner_state="{}", mode="deepening"
     )
-    assert "深入阶段" in deepening
+    assert "Current stage is deepening" in deepening
 
 
 def test_intervention_validates() -> None:
     result = validate_response(
-        '{"action": "counterexample", "reason": "边界不清", '
-        '"content": "如果放弃三个选择，机会成本是三个加起来吗？", '
+        '{"action": "counterexample", "reason": "boundary unclear", '
+        '"content": "If you give up three options, is the opportunity cost all three added together?", '
         '"requires_user_response": true}',
         Intervention,
     )
     assert result.action == "counterexample"
-    assert result.content.startswith("如果放弃")
+    assert result.content.startswith("If you give up")
 
 
 def test_learner_state_updater_prompt_requests_json() -> None:
     prompt = learner_state_updater_prompt(
-        source_text="S", concept="机会成本", intervention="提示",
+        source_text="S", concept="opportunity cost", intervention="hint",
         user_answer="A", learner_state="{}"
     )
-    assert "学习状态更新器" in prompt
+    assert "learner-state updater" in prompt
     assert '"next_best_action"' in prompt
     assert '"understanding_level"' in prompt
 
 
 def test_learner_state_updater_prompt_includes_goal() -> None:
-    """V0.3.1 — 更新器携带学习目标，作为达标判定尺度。"""
+    """V0.3.1 — the updater carries the learning goal as the bar for passing."""
     prompt = learner_state_updater_prompt(
-        source_text="S", concept="机会成本", intervention="提示",
+        source_text="S", concept="opportunity cost", intervention="hint",
         user_answer="A", learner_state="{}", learning_goal="exam",
     )
-    assert "为考试掌握" in prompt
-    assert "术语准确" in prompt
+    assert "master it for an exam" in prompt
+    assert "accurate terms" in prompt
     default = learner_state_updater_prompt(
-        source_text="S", concept="机会成本", intervention="提示",
+        source_text="S", concept="opportunity cost", intervention="hint",
         user_answer="A", learner_state="{}",
     )
-    assert "为考试掌握" not in default
+    assert "master it for an exam" not in default
 
 
 def test_learner_state_update_validates() -> None:
     result = validate_response(
-        '{"understanding_level": "application", "understood": ["能用"], '
+        '{"understanding_level": "application", "understood": ["can use it"], '
         '"uncertain": [], "misconceptions": [], "last_response_quality": "deep", '
         '"next_best_action": "none"}',
         LearnerStateUpdate,
@@ -524,58 +524,58 @@ def test_learner_state_update_validates() -> None:
 
 
 def test_deepening_offer_prompt_requests_json() -> None:
-    prompt = deepening_offer_prompt(concept="机会成本", understanding_level="relationship")
-    assert "学习教练" in prompt
-    assert "机会成本" in prompt
+    prompt = deepening_offer_prompt(concept="opportunity cost", understanding_level="relationship")
+    assert "learning coach" in prompt
+    assert "opportunity cost" in prompt
     assert '"offer"' in prompt
     assert '"options"' in prompt
 
 
 def test_deepening_offer_validates() -> None:
     result = validate_response(
-        '{"offer": "你已经抓住核心，要不要再挖一层？", "options": ["深入", "先到这里"]}',
+        '{"offer": "You\'ve got the core — want to go one layer deeper?", "options": ["Go deeper", "That\'s enough"]}',
         DeepeningOffer,
     )
-    assert result.offer == "你已经抓住核心，要不要再挖一层？"
-    assert result.options == ["深入", "先到这里"]
+    assert result.offer == "You've got the core — want to go one layer deeper?"
+    assert result.options == ["Go deeper", "That's enough"]
 
 
 def test_simplify_explanation_prompt_is_plain_text() -> None:
     prompt = simplify_explanation_prompt(
-        title="机会成本", source_text="S", explanation="旧解释有点绕"
+        title="opportunity cost", source_text="S", explanation="the old explanation was a bit convoluted"
     )
-    assert "更简单" in prompt or "降一个台阶" in prompt
-    assert "旧解释有点绕" in prompt
+    assert "not simple enough" in prompt or "another notch" in prompt
+    assert "a bit convoluted" in prompt
     assert '{"' not in prompt
 
 
 @pytest.mark.parametrize(
     ("qtype", "marker"),
     [
-        ("verification_plus", "再验证"),
-        ("connection", "联系"),
-        ("counterfactual", "反事实"),
-        ("action", "行动"),
-        ("first_principles", "第一性原理"),
+        ("verification_plus", "Re-verify"),
+        ("connection", "Connection"),
+        ("counterfactual", "Counterfactual"),
+        ("action", "Action"),
+        ("first_principles", "First principles"),
     ],
 )
 def test_legacy_deeper_question_prompt_all_types(qtype: str, marker: str) -> None:
     prompt = _legacy_deeper_question_prompt(
-        title="机会成本", source_text="S", question_type=qtype
+        title="opportunity cost", source_text="S", question_type=qtype
     )
     assert marker in prompt
-    assert "深化" in prompt
+    assert "Deeper probe" in prompt
     assert '{"' not in prompt
 
 
 def test_legacy_deeper_question_prompt_includes_qa_history_when_given() -> None:
     prompt = _legacy_deeper_question_prompt(
-        title="机会成本",
+        title="opportunity cost",
         source_text="S",
         question_type="connection",
-        qa_history="回答记录",
+        qa_history="answer records",
     )
-    assert "回答记录" in prompt
+    assert "answer records" in prompt
 
 
 def test_legacy_deeper_question_prompt_invalid_type_rejected() -> None:

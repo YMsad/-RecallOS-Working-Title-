@@ -1,4 +1,5 @@
-"""V1.0 — 设备指纹 + Cloudflare Worker 临时 Key 分发 + 客户端集成测试（全部隔离网络）。"""
+"""V1.0 — device fingerprint + Cloudflare Worker temporary key distribution +
+client integration tests (fully network-isolated)."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ def fresh_db(tmp_path):
     yield
 
 
-# ----------------------------------------------------------- 设备指纹
+# ----------------------------------------------------------- device fingerprint
 
 
 def test_fingerprint_is_64_hex_and_stable() -> None:
@@ -32,7 +33,7 @@ def test_fingerprint_is_64_hex_and_stable() -> None:
     b = get_device_fingerprint()
     assert a == b
     assert len(a) == 64
-    int(a, 16)  # 必须是合法十六进制
+    int(a, 16)  # must be valid hexadecimal
 
 
 def test_fingerprint_changes_when_component_changes(monkeypatch) -> None:
@@ -52,7 +53,7 @@ def test_fingerprint_helpers_degrade_gracefully(monkeypatch) -> None:
 
     monkeypatch.setattr("core.device_fingerprint._run", lambda *a, **k: "")
     assert _get_disk_serial() == "unknown_disk"
-    # 拿不到任何硬件信息时，指纹仍能生成
+    # the fingerprint is still generated when no hardware info is available
     fp = get_device_fingerprint()
     assert len(fp) == 64
 
@@ -89,12 +90,12 @@ def test_key_manager_fetches_and_caches(tmp_path) -> None:
         "https://key.example", cache_dir=tmp_path, device_id="d" * 64, transport=transport
     ) as km:
         assert km.get_api_key() == "sk-temp-1"
-        assert km.get_api_key() == "sk-temp-1"  # 第二次命中缓存
+        assert km.get_api_key() == "sk-temp-1"  # second call hits the cache
     cache = json.loads((tmp_path / "key_cache.json").read_text(encoding="utf-8"))
     assert cache["api_key"] == "sk-temp-1"
     assert cache["device_id"] == "d" * 64
     assert cache["expires_at"] > 0
-    # 用量日志已写
+    # usage log was written
     log = (tmp_path / "usage.log").read_text(encoding="utf-8").strip().splitlines()
     assert len(log) == 1
     assert '"daily_used": 1' in log[0]
@@ -115,7 +116,7 @@ def test_key_manager_uses_valid_cache_without_network(tmp_path) -> None:
         encoding="utf-8",
     )
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(500)  # 网络不可用时也不应被调用
+        lambda request: httpx.Response(500)  # should not be called even without a network
     )
     with KeyManager(
         "https://key.example", cache_dir=tmp_path, device_id="d" * 64, transport=transport
@@ -141,7 +142,7 @@ def test_key_manager_rejects_expired_cache_and_refetches(tmp_path) -> None:
 
 def test_key_manager_raises_on_daily_limit(tmp_path) -> None:
     def limit_body(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, json={"error": "今日学习次数已用尽", "code": "DAILY_LIMIT_EXCEEDED"})
+        return httpx.Response(429, json={"error": "Daily study quota reached, please come back tomorrow", "code": "DAILY_LIMIT_EXCEEDED"})
 
     transport = worker_transport(**{"/get-key": limit_body})
     with KeyManager(
@@ -193,7 +194,7 @@ def test_key_manager_revoke_all(tmp_path) -> None:
 
 def test_key_manager_revoke_failure(tmp_path) -> None:
     transport = worker_transport(
-        **{"/revoke": lambda request: httpx.Response(401, json={"error": "未授权"})}
+        **{"/revoke": lambda request: httpx.Response(401, json={"error": "Unauthorized"})}
     )
     with KeyManager(
         "https://key.example", cache_dir=tmp_path, device_id="d" * 64, transport=transport
@@ -202,7 +203,7 @@ def test_key_manager_revoke_failure(tmp_path) -> None:
             km.revoke_all("wrong-secret")
 
 
-# ---------------------------------------------------- 客户端集成（Worker 优先 + 手动兜底）
+# ---------------------------------------------------- client integration (Worker first + manual fallback)
 
 
 class _FakeKeyManager:
@@ -257,7 +258,7 @@ def test_client_falls_back_to_manual_key_when_worker_fails(tmp_path) -> None:
         recallos_worker_url="https://key.example",
         _env_file=None,
     )
-    km = _FakeKeyManager(error=KeyManagerError("离线"))
+    km = _FakeKeyManager(error=KeyManagerError("offline"))
     with DeepSeekClient(
         settings=settings, transport=httpx.MockTransport(handler), key_manager=km
     ) as client:
@@ -278,7 +279,7 @@ def test_client_falls_back_when_daily_limit_exceeded(tmp_path) -> None:
         recallos_worker_url="https://key.example",
         _env_file=None,
     )
-    km = _FakeKeyManager(error=DailyLimitExceeded("今日额度用尽"))
+    km = _FakeKeyManager(error=DailyLimitExceeded("daily quota used up"))
     with DeepSeekClient(
         settings=settings, transport=httpx.MockTransport(handler), key_manager=km
     ) as client:
@@ -294,7 +295,7 @@ def test_client_raises_when_no_key_anywhere(monkeypatch) -> None:
         recallos_worker_url="https://key.example",
         _env_file=None,
     )
-    km = _FakeKeyManager(error=KeyManagerError("离线"))
+    km = _FakeKeyManager(error=KeyManagerError("offline"))
     with pytest.raises(DeepSeekAuthError):
         DeepSeekClient(
             settings=settings,

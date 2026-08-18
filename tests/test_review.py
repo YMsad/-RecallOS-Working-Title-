@@ -64,8 +64,8 @@ def make_client(*responses: httpx.Response) -> tuple[DeepSeekClient, ScriptedTra
     return client, transport
 
 
-def seed_concept(title="机会成本", *, mastery=MASTERY_UNDERSTOOD) -> int:
-    cid = database.save_concept(title, "原文：选择意味着放弃")
+def seed_concept(title="opportunity cost", *, mastery=MASTERY_UNDERSTOOD) -> int:
+    cid = database.save_concept(title, "Original: choosing means giving up")
     database.update_concept(cid, mastery=mastery)
     return cid
 
@@ -84,16 +84,16 @@ def test_add_to_review_queue_sets_tomorrow() -> None:
 def test_get_due_reviews_returns_overdue_and_today() -> None:
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
-    c1 = seed_concept("概念A")
-    c2 = seed_concept("概念B")
-    c3 = seed_concept("概念C")
+    c1 = seed_concept("Concept A")
+    c2 = seed_concept("Concept B")
+    c3 = seed_concept("Concept C")
     database.update_concept(c1, next_review_date=tomorrow)
     database.update_concept(c2, next_review_date=yesterday)
     database.update_concept(c3, next_review_date=tomorrow)
 
     due = get_due_reviews()
     titles = [c["title"] for c in due]
-    assert titles == ["概念B"]  # only overdue today
+    assert titles == ["Concept B"]  # only overdue today
 
 
 def test_update_review_status_passed_advances_stage() -> None:
@@ -132,32 +132,32 @@ def test_update_review_status_missing_concept_returns_false() -> None:
 
 def test_review_session_uses_tomorrow_hook_from_summary() -> None:
     cid = seed_concept()
-    database.save_daily_summary(cid, "搞懂了", "边际效用和机会成本是什么关系？")
-    client, _ = make_client(judge(True, "记得很清楚"))
+    database.save_daily_summary(cid, "Understood", "What is the relationship between marginal utility and opportunity cost?")
+    client, _ = make_client(judge(True, "Remembered clearly"))
     session = ReviewSession(cid, client=client)
     question = session.start()
-    assert question == "边际效用和机会成本是什么关系？"
+    assert question == "What is the relationship between marginal utility and opportunity cost?"
     assert session.next_question() == question
     assert session.phase == "reviewing"
 
 
 def test_review_session_generates_question_when_no_hook() -> None:
     cid = seed_concept()
-    client, transport = make_client(text_reply("复习题：什么是机会成本？"))
+    client, transport = make_client(text_reply("Review question: what is opportunity cost?"))
     session = ReviewSession(cid, client=client)
     question = session.start()
-    assert question == "复习题：什么是机会成本？"
+    assert question == "Review question: what is opportunity cost?"
     payload = transport.requests[0]["messages"][1]["content"]
-    assert "复习" in payload
+    assert "review day" in payload
 
 
 def test_review_pass_advances_stage_and_logs() -> None:
     cid = seed_concept()
-    database.save_daily_summary(cid, "搞懂了", "明天的追问")
-    client, _ = make_client(judge(True, "回答得很好"))
+    database.save_daily_summary(cid, "Understood", "Tomorrow's follow-up question")
+    client, _ = make_client(judge(True, "Well answered"))
     session = ReviewSession(cid, client=client)
     session.start()
-    result = session.submit_answer("我的回答")
+    result = session.submit_answer("my answer")
     assert result["passed"] is True
     assert result["attempts"] == 1
     assert session.phase == "finished"
@@ -166,17 +166,17 @@ def test_review_pass_advances_stage_and_logs() -> None:
     logs = database.get_review_logs(cid)
     assert len(logs) == 1
     assert logs[0]["passed"] == 1
-    assert logs[0]["question"] == "明天的追问"
+    assert logs[0]["question"] == "Tomorrow's follow-up question"
 
 
 def test_review_three_failures_marks_needs_relearn() -> None:
     cid = seed_concept()
-    database.save_daily_summary(cid, "搞懂了", "明天的追问")
-    client, _ = make_client(*(judge(False, "再想想") for _ in range(MAX_REVIEW_ATTEMPTS)))
+    database.save_daily_summary(cid, "Understood", "Tomorrow's follow-up question")
+    client, _ = make_client(*(judge(False, "Think again") for _ in range(MAX_REVIEW_ATTEMPTS)))
     session = ReviewSession(cid, client=client)
     session.start()
     for i in range(MAX_REVIEW_ATTEMPTS):
-        result = session.submit_answer(f"答{i + 1}")
+        result = session.submit_answer(f"answer {i + 1}")
         assert result["passed"] is False
         assert result["attempts"] == i + 1
     assert session.phase == "finished"
@@ -191,10 +191,10 @@ def test_review_three_failures_marks_needs_relearn() -> None:
 
 def test_review_submit_before_start_raises() -> None:
     cid = seed_concept()
-    client, _ = make_client(text_reply("复习题"), judge(True, "对"))
+    client, _ = make_client(text_reply("Review question"), judge(True, "Right"))
     session = ReviewSession(cid, client=client)
     with pytest.raises(ValueError):
         session.submit_answer("x")
     session.start()
-    session.submit_answer("答")
+    session.submit_answer("answer")
     assert session.phase == "finished"

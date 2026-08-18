@@ -23,12 +23,12 @@ from pydantic import (
 
 # ------------------------------------------------------------------ constants
 
-MASTERY_LEARNING = "学习中"
-MASTERY_UNCLEAR = "模糊"
-MASTERY_UNDERSTOOD = "搞懂了"
+MASTERY_LEARNING = "Learning"
+MASTERY_UNCLEAR = "Unclear"
+MASTERY_UNDERSTOOD = "Understood"
 MASTERY_VALUES: tuple[str, ...] = (MASTERY_LEARNING, MASTERY_UNCLEAR, MASTERY_UNDERSTOOD)
 
-Mastery = Literal["学习中", "模糊", "搞懂了"]
+Mastery = Literal["Learning", "Unclear", "Understood"]
 
 # ----------------------------------------------------------------- type aliases
 

@@ -28,43 +28,44 @@ class FakeClient:
 
     def chat(self, messages, **kwargs) -> str:
         user = messages[1]["content"]
-        if "判断学习者的回答是否抓住了要点" in user:
+        if "hit the point" in user:
             q = self.questions[self.i]
             self.i += 1
             return json.dumps(
                 {"is_correct": q["correct"], "feedback": q["feedback"], "hint": q.get("hint")},
                 ensure_ascii=False,
             )
-        if "参考解释" in user:
-            return "参考解释：机会成本是放弃的价值"
+        if "reference explanation" in user:
+            return "Reference explanation: opportunity cost is the value you give up"
         if "concept_title" in user:
             return json.dumps(
-                [{"concept_title": c, "relation_text": "都关于选择"} for c in self.related],
+                [{"concept_title": c, "relation_text": "both about choice"} for c in self.related],
                 ensure_ascii=False,
             )
-        if "每日总结" in user:
+        if "daily summary" in user:
             return json.dumps(
-                {"breakthrough": "我终于搞懂了机会成本", "tomorrow_hook": "明天再想"},
+                {"breakthrough": "I finally understood opportunity cost",
+                 "tomorrow_hook": "More to think about tomorrow"},
                 ensure_ascii=False,
             )
-        if "我不懂" in user:
-            return "大白话：机会成本就是你放弃的那个次优选择"
-        if "预热" in user:
-            return "用一句话说，机会成本就是你为了得到A而放弃的B。"
-        if "降维" in user:
-            return "简化后的问题"
-        if "换个角度" in user:
-            return "换个角度的问题"
-        if "开场第一个问题" in user:
-            return f"开场问题：{self.questions[self.i]['question']}"
-        if "层追问" in user:
-            return f"问题：{self.questions[self.i]['question']}"
+        if "I don't get it" in user:
+            return "In plain words: opportunity cost is the next-best choice you gave up"
+        if "warm-up" in user:
+            return "In one sentence, opportunity cost is the B you gave up to get A."
+        if "Simplify this question" in user:
+            return "Simplified question"
+        if "different angle" in user:
+            return "A question from a different angle"
+        if "very first question" in user:
+            return f"Opening question: {self.questions[self.i]['question']}"
+        if "Layer" in user:
+            return f"Question: {self.questions[self.i]['question']}"
         raise AssertionError(f"unexpected prompt: {user[:40]}")
 
 
 class BoomClient(FakeClient):
     def chat(self, messages, **kwargs) -> str:
-        raise DeepSeekError("模拟 API 故障")
+        raise DeepSeekError("simulated API failure")
 
 
 @pytest.fixture(autouse=True)
@@ -81,106 +82,129 @@ def run_cli(monkeypatch, inputs: list[str], client_factory, argv: list[str] | No
 
 
 def make_questions(n: int) -> list[dict]:
-    return [{"question": f"问题{i}", "correct": True, "feedback": "对"} for i in range(n)]
+    return [
+        {"question": f"Question {i}", "correct": True, "feedback": "Right"} for i in range(n)
+    ]
 
 
 def test_cli_full_flow(capsys, monkeypatch) -> None:
-    database.save_concept("沉没成本", "已学")
+    database.save_concept("sunk cost", "already learned")
     client_factory = lambda: FakeClient(
-        make_questions(4), related=["沉没成本"]
+        make_questions(4), related=["sunk cost"]
     )
     run_cli(
         monkeypatch,
-        ["机会成本", "原文：选择意味着放弃", "答1", "答2", "答3", "答4", "机会成本是放弃的价值"],
+        [
+            "opportunity cost",
+            "Source: choice means giving up",
+            "Answer 1",
+            "Answer 2",
+            "Answer 3",
+            "Answer 4",
+            "opportunity cost is the value of what you give up",
+        ],
         client_factory,
         argv=[],
     )
     out = capsys.readouterr().out
-    assert "我终于搞懂了机会成本" in out
-    assert "沉没成本" in out  # connection recommendation
-    assert "明天再想" in out  # tomorrow hook
+    assert "I finally understood opportunity cost" in out
+    assert "sunk cost" in out  # connection recommendation
+    assert "More to think about tomorrow" in out  # tomorrow hook
     today = database.get_today_summary()
     assert today is not None
-    assert today["breakthrough_text"] == "我终于搞懂了机会成本"
-    target = next(c for c in database.get_all_concepts() if c["title"] == "机会成本")
-    assert target["mastery"] == "搞懂了"
+    assert today["breakthrough_text"] == "I finally understood opportunity cost"
+    target = next(c for c in database.get_all_concepts() if c["title"] == "opportunity cost")
+    assert target["mastery"] == "Understood"
 
 
 def test_cli_quit_mid_session(capsys, monkeypatch) -> None:
     run_cli(
-        monkeypatch, ["机会成本", "原文", "q"], lambda: FakeClient(make_questions(4)), argv=[]
+        monkeypatch,
+        ["opportunity cost", "Source", "q"],
+        lambda: FakeClient(make_questions(4)),
+        argv=[],
     )
     out = capsys.readouterr().out
-    assert "AI 调用失败" not in out
+    assert "AI call failed" not in out
     assert database.get_today_summary() is None
 
 
 def test_cli_handles_api_error(capsys, monkeypatch) -> None:
     run_cli(
         monkeypatch,
-        ["机会成本", "原文"],
+        ["opportunity cost", "Source"],
         lambda: BoomClient(make_questions(4)),
         argv=[],
     )
     out = capsys.readouterr().out
-    assert "AI 调用失败" in out
-    assert "模拟 API 故障" in out
+    assert "AI call failed" in out
+    assert "simulated API failure" in out
 
 
 def test_read_line_quit_word(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda prompt="": "退出")
     assert cli_main.read_line(">") is None
-    monkeypatch.setattr("builtins.input", lambda prompt="": "机会成本")
-    assert cli_main.read_line(">") == "机会成本"
+    monkeypatch.setattr("builtins.input", lambda prompt="": "opportunity cost")
+    assert cli_main.read_line(">") == "opportunity cost"
 
 
 def test_history_lists_concepts(monkeypatch, capsys) -> None:
-    database.save_concept("机会成本", "原文")
-    cid = database.save_concept("沉没成本", "原文")
-    database.update_concept(cid, mastery="搞懂了")
+    database.save_concept("opportunity cost", "source")
+    cid = database.save_concept("sunk cost", "source")
+    database.update_concept(cid, mastery="Understood")
     inputs = iter(["q"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main(["--history"])
     out = capsys.readouterr().out
-    assert "历史回顾" in out
-    assert "机会成本" in out
-    assert "沉没成本" in out
+    assert "RecallOS History" in out
+    assert "opportunity cost" in out
+    assert "sunk cost" in out
 
 
 def test_history_empty(monkeypatch, capsys) -> None:
     inputs = iter([])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main(["--history"])
-    assert "还没有学习记录" in capsys.readouterr().out
+    assert "No learning records yet" in capsys.readouterr().out
 
 
 def test_history_show_detail(monkeypatch, capsys) -> None:
-    cid = database.save_concept("机会成本", "原文：选择意味着放弃")
-    database.update_concept(cid, mastery="搞懂了", user_definition="机会成本是放弃的价值")
-    database.save_qa(cid, "为什么机会成本和选择有关？", "因为每次都要放弃", True)
-    database.save_qa(cid, "它关注过去还是未来？", "未来", False, hint_used=True)
-    other = database.save_concept("沉没成本")
-    database.save_connection(cid, other, "都关于选择，一个看未来一个看过去")
-    database.save_daily_summary(cid, "我终于搞懂了机会成本", "明天再想")
+    cid = database.save_concept("opportunity cost", "Source: choice means giving up")
+    database.update_concept(
+        cid,
+        mastery="Understood",
+        user_definition="opportunity cost is the value of what you give up",
+    )
+    database.save_qa(
+        cid, "Why is opportunity cost related to choice?", "because every choice means giving up", True
+    )
+    database.save_qa(cid, "Does it look to the past or the future?", "the future", False, hint_used=True)
+    other = database.save_concept("sunk cost")
+    database.save_connection(
+        cid, other, "both about choice, one looks to the future and the other to the past"
+    )
+    database.save_daily_summary(
+        cid, "I finally understood opportunity cost", "More to think about tomorrow"
+    )
 
     inputs = iter(["1", "q"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main(["--history"])
     out = capsys.readouterr().out
-    assert "我的理解：机会成本是放弃的价值" in out
-    assert "为什么机会成本和选择有关？" in out
-    assert "（用过提示）" in out
-    assert "沉没成本" in out  # connection
-    assert "我终于搞懂了机会成本" in out  # summary
-    assert "明天再想" in out
+    assert "My understanding: opportunity cost is the value of what you give up" in out
+    assert "Why is opportunity cost related to choice?" in out
+    assert "(used hint)" in out
+    assert "sunk cost" in out  # connection
+    assert "I finally understood opportunity cost" in out  # summary
+    assert "More to think about tomorrow" in out
 
 
 def test_history_invalid_number(monkeypatch, capsys) -> None:
-    database.save_concept("机会成本")
+    database.save_concept("opportunity cost")
     inputs = iter(["99", "q"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main(["--history"])
-    assert "无效输入" in capsys.readouterr().out
+    assert "Invalid input" in capsys.readouterr().out
 
 
 class PingClient:
@@ -193,7 +217,7 @@ class PingClient:
         return None
 
     def chat(self, messages, **kwargs) -> str:
-        return "连通"
+        return "OK"
 
 
 def no_key_env(monkeypatch, tmp_path):
@@ -232,7 +256,7 @@ def test_cli_reprompts_on_invalid_key(monkeypatch, capsys, tmp_path) -> None:
                 if not state["failed"]:
                     state["failed"] = True
                     raise DeepSeekAuthError("Authentication failed (HTTP 401)")
-                return "连通"
+                return "OK"
 
         return FlakyClient()
 
@@ -241,5 +265,5 @@ def test_cli_reprompts_on_invalid_key(monkeypatch, capsys, tmp_path) -> None:
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     cli_main.main([])
     out = capsys.readouterr().out
-    assert "Key 无效，请重新输入" in out
+    assert "Invalid key, please try again" in out
     assert get_api_key_from_config() == "sk-good"

@@ -65,7 +65,7 @@ class DeepSeekClient:
         from core import DeepSeekClient
 
         with DeepSeekClient() as client:
-            reply = client.chat([{"role": "user", "content": "你好"}])
+            reply = client.chat([{"role": "user", "content": "hello"}])
     """
 
     def __init__(
@@ -117,10 +117,10 @@ class DeepSeekClient:
             try:
                 key = km.get_api_key()
                 if key:
-                    logger.info("使用 Worker 分发的临时 Key")
+                    logger.info("using temporary key issued by Worker")
                     return key
             except (KeyManagerError, DailyLimitExceeded) as exc:
-                logger.warning("Worker Key 分发失败，回退手动 Key：%s", exc)
+                logger.warning("Worker key distribution failed, falling back to manual key: %s", exc)
         return self.settings.deepseek_api_key
 
     def close(self) -> None:
@@ -178,7 +178,7 @@ class DeepSeekClient:
         last_error: DeepSeekError | None = None
         for attempt in range(1, self.settings.max_retries + 1):
             logger.info(
-                "AI 请求: model=%s messages=%d max_tokens=%s（第 %d/%d 次）",
+                "AI request: model=%s messages=%d max_tokens=%s (attempt %d/%d)",
                 payload["model"],
                 len(messages),
                 max_tokens,
@@ -257,11 +257,11 @@ class DeepSeekClient:
             response = self._client.post(path, json=payload)
         except httpx.TimeoutException as exc:
             logger.warning(
-                "DeepSeek 请求超时（超过 %.0fs）: %s", self.settings.request_timeout, exc
+                "DeepSeek request timed out (over %.0fs): %s", self.settings.request_timeout, exc
             )
             raise DeepSeekNetworkError(f"Request timed out: {exc}") from exc
         except httpx.TransportError as exc:
-            logger.warning("DeepSeek 网络错误: %s", exc)
+            logger.warning("DeepSeek network error: %s", exc)
             raise DeepSeekNetworkError(f"Network error: {exc}") from exc
 
         status = response.status_code
@@ -303,7 +303,7 @@ def ping() -> str:
     """Send a minimal chat request to verify connectivity. Returns the reply."""
     with DeepSeekClient() as client:
         return client.chat(
-            [{"role": "user", "content": "请只回复两个字：连通"}],
+            [{"role": "user", "content": "Reply with exactly two characters: OK"}],
             max_tokens=10,
         )
 

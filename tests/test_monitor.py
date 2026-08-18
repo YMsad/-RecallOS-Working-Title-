@@ -1,4 +1,4 @@
-"""V1.0 — 用量监控脚本测试（隔离网络，monkeypatch httpx）。"""
+"""V1.0 — usage-monitor script tests (network-isolated, monkeypatched httpx)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from scripts import monitor_usage
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    """脚本在 import 时就读取了环境变量，测试前重置关键配置。"""
+    """The script reads env vars at import time; reset the key config before each test."""
     monkeypatch.setattr(monitor_usage, "TELEGRAM_BOT_TOKEN", "bot-token")
     monkeypatch.setattr(monitor_usage, "TELEGRAM_CHAT_ID", "chat-id")
     monkeypatch.setattr(monitor_usage, "REVOKE_SECRET", "admin-secret")
@@ -78,7 +78,7 @@ def test_send_telegram_alert_posts(monkeypatch) -> None:
         return httpx.Response(200, json={"ok": True})
 
     monkeypatch.setattr(monitor_usage.httpx, "post", fake_post)
-    ok = monitor_usage.send_telegram_alert("超啦")
+    ok = monitor_usage.send_telegram_alert("over the limit")
     assert ok is True
     assert "sendMessage" in captured["url"]
     assert captured["json"]["chat_id"] == "chat-id"
@@ -90,10 +90,10 @@ def test_send_telegram_alert_skips_when_unconfigured(monkeypatch) -> None:
     monkeypatch.setattr(monitor_usage, "TELEGRAM_CHAT_ID", "")
 
     def fake_post(*a, **k):
-        raise AssertionError("不应发起请求")
+        raise AssertionError("should not make a request")
 
     monkeypatch.setattr(monitor_usage.httpx, "post", fake_post)
-    assert monitor_usage.send_telegram_alert("超啦") is False
+    assert monitor_usage.send_telegram_alert("over the limit") is False
 
 
 def test_auto_revoke_success(monkeypatch) -> None:
@@ -114,7 +114,7 @@ def test_auto_revoke_requires_config(monkeypatch) -> None:
 
 def test_auto_revoke_failure_returns_error(monkeypatch) -> None:
     def fake_get(*a, **k):
-        return httpx.Response(401, json={"error": "未授权"})
+        return httpx.Response(401, json={"error": "Unauthorized"})
 
     monkeypatch.setattr(monitor_usage.httpx, "get", fake_get)
     result = monitor_usage.auto_revoke()

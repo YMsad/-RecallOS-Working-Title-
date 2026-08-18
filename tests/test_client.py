@@ -40,7 +40,7 @@ def make_client(handler) -> DeepSeekClient:
     return DeepSeekClient(settings=TEST_SETTINGS, transport=transport)
 
 
-def ok_body(content: str = "你好") -> httpx.Response:
+def ok_body(content: str = "hi") -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -61,10 +61,10 @@ def test_missing_api_key_raises(monkeypatch) -> None:
 
 def test_chat_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return ok_body("理解瞬间")
+        return ok_body("aha moment")
 
     with make_client(handler) as client:
-        assert client.chat([{"role": "user", "content": "hi"}]) == "理解瞬间"
+        assert client.chat([{"role": "user", "content": "hi"}]) == "aha moment"
 
 
 def test_max_tokens_is_sent() -> None:
@@ -179,10 +179,10 @@ def test_retries_then_succeeds_on_429() -> None:
         calls["n"] += 1
         if calls["n"] < 3:
             return error_body(429)
-        return ok_body("最终回复")
+        return ok_body("final reply")
 
     with make_client(handler) as client:
-        assert client.chat([{"role": "user", "content": "hi"}]) == "最终回复"
+        assert client.chat([{"role": "user", "content": "hi"}]) == "final reply"
     assert calls["n"] == 3
 
 
@@ -241,10 +241,10 @@ def test_network_error_retries_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] < 2:
             raise httpx.ConnectError("connection refused")
-        return ok_body("恢复")
+        return ok_body("recovered")
 
     with make_client(handler) as client:
-        assert client.chat([{"role": "user", "content": "hi"}]) == "恢复"
+        assert client.chat([{"role": "user", "content": "hi"}]) == "recovered"
     assert calls["n"] == 2
 
 
@@ -264,6 +264,6 @@ def test_real_connectivity() -> None:
         pytest.skip("real DEEPSEEK_API_KEY not set")
     with DeepSeekClient(settings=settings) as client:
         reply = client.chat(
-            [{"role": "user", "content": "请只回复两个字：连通"}], max_tokens=10
+            [{"role": "user", "content": "Reply with exactly two characters: OK"}], max_tokens=10
         )
         assert reply.strip()

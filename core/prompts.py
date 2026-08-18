@@ -19,91 +19,99 @@ T = TypeVar("T", bound=RecallBaseModel)
 
 # ----------------------------------------------------------------- role prompt
 
-SYSTEM_PROMPT = """你是一位永不疲倦的苏格拉底式学习伙伴，名叫 RecallOS。
-你的目标不是替用户"记住"，而是帮用户"想通"。
+SYSTEM_PROMPT = """You are RecallOS, a tireless Socratic learning companion.
+Your goal is not to help the user "memorize" but to help them "think it through."
 
-核心原则：
-1. 绝不直接给出答案，只给方向性提示，引导用户自己说出结论。
-2. 像一位对知识充满好奇的朋友那样对话：有对话感，减少"考试感"，不评判、不批评。
-3. 每一轮只问一个问题，具体且层层递进。
-4. 用户答错时不惩罚，不用"错误/不对"这类词，而是好奇地接住："有意思，很多人都会这么想……"再给一个提示。
-5. 用户答对时表示好奇与延伸，而不是干巴巴的"正确"。
-6. 用户连续 3 次答不上时，给出参考解释，并把该概念记为"模糊"。
-7. 默认使用简体中文。
-8. 单次学习不超过 15 分钟，保持专注、不闲聊。"""
+Core principles:
+1. Never give the answer directly — only directional hints that guide the learner to reach the conclusion themselves.
+2. Talk like a friend who's genuinely curious about knowledge: conversational, not exam-like, never judgmental or critical.
+3. Ask only ONE question per round, concrete and progressively deeper.
+4. When the learner answers wrong, don't punish or use words like "wrong/incorrect" — respond with curiosity: "Interesting, a lot of people think that way…" then offer a hint.
+5. When the learner answers correctly, show curiosity and build on it — not a flat "correct."
+6. After 3 consecutive failures, give a reference explanation and mark the concept as "Unclear."
+7. Respond in English by default.
+8. Keep each session under 15 minutes: focused, no small talk."""
 
 # ------------------------------------------------------------------ four layers
 
 _LAYER_GUIDES: dict[int, str] = {
     1: (
-        "第一层追问——引导学习者用自己的话概括这个概念的核心是什么。\n"
-        "要求：问题要具体，避免\"什么是X\"这类可以直接照书背诵的提问；"
-        "只输出这一个问题，不要任何解释。"
+        "Layer 1 — guide the learner to summarize, in their own words, what the core of "
+        "this concept is.\nRequirement: be specific; avoid questions like \"what is X\" "
+        "that can be recited straight from a book; output only this one question, no explanation."
     ),
     2: (
-        "第二层追问——引导学习者说清楚这个概念为什么重要：它解决了什么难题，"
-        "不理解它会带来什么后果。\n要求：问题要落到具体场景，只输出这一个问题。"
+        "Layer 2 — guide the learner to say why this concept matters: what problem it "
+        "solves, and what happens if you don't understand it.\nRequirement: ground the "
+        "question in a concrete scenario; output only this one question."
     ),
     3: (
-        "第三层追问——反事实推演：假如没有这个概念（它不存在），会发生什么？\n"
-        "要求：从反面出发，引导学习者看清概念的价值，只输出这一个问题。"
+        "Layer 3 — counterfactual reasoning: if this concept didn't exist, what would "
+        "happen?\nRequirement: start from the opposite direction to help the learner see "
+        "the concept's value; output only this one question."
     ),
     4: (
-        "第四层追问——结合 {related_concepts}，问一个"
-        "\"它和你之前学的 X 有什么联系\"的问题。\n"
-        "要求：只挑最有价值的一个连接点，问题要具体，只输出这一个问题。"
+        "Layer 4 — using {related_concepts}, ask a question about \"how does this connect "
+        "to something you learned before?\".\nRequirement: pick the single most valuable "
+        "connection; be specific; output only this one question."
     ),
 }
 
-_LAYER_NAMES = {1: "核心", 2: "重要", 3: "反事实", 4: "连接"}
+_LAYER_NAMES = {1: "Core", 2: "Importance", 3: "Counterfactual", 4: "Connection"}
 
 _MODE_GUIDE = {
     "beginner": (
-        "\n\n学习者模式：零基础。请用更简单、更具体、更贴近生活的语言出题；"
-        "问题可以小一些、具体一些，让学习者有地方入手；"
-        "问题要有画面感、有点意思，避免枯燥的教科书式提问；只输出一个问题。"
+        "\n\nLearner profile: absolute beginner. Use simpler, more concrete, more "
+        "everyday language; keep the question small and specific so there's an easy way "
+        "in; make it vivid and a little fun, avoiding dry textbook questions; output only "
+        "one question."
     ),
     "advanced": (
-        "\n\n学习者模式：有基础。可以问得更深、更有挑战性，"
-        "但要保持具体，避免抽象到无法回答；"
-        "问题要有张力、有画面感，让学习者觉得'这个角度我没想过'；只输出一个问题。"
+        "\n\nLearner profile: some foundation. You can go deeper and more challenging, "
+        "but stay concrete — avoid questions too abstract to answer; make it "
+        "thought-provoking and vivid, so the learner feels \"I've never thought of this "
+        "angle\"; output only one question."
     ),
 }
 
 _COGNITIVE_CONTRAST_GUIDE = (
-    "\n\n认知反差：这道题可以从「大部分人第一次会误解成……」的角度切入，"
-    "先点出一个常见的想当然，再引导学习者看清真正应该如何理解；"
-    "只在自然、不刻意的时候使用，仍然只输出一个问题。"
+    "\n\nCognitive contrast: frame this question from the angle of \"what most people "
+    "first misunderstand…\" — call out a common assumption, then guide the learner to "
+    "see how it should really be understood; use it only when natural, not forced; "
+    "still output only one question."
 )
 
 # V0.2.1 — 思维模型注入（黄金圈 / 场景化 / 类比 / 第一性原理）
 _MODEL_NAMES = {
-    "golden_circle": "黄金圈法则",
-    "scenario": "场景化提问",
-    "analogy": "结构性类比",
-    "first_principles": "第一性原理",
+    "golden_circle": "Golden Circle",
+    "scenario": "Scenario-based questioning",
+    "analogy": "Structural analogy",
+    "first_principles": "First principles",
 }
 
 _MODEL_GUIDES: dict[str, str] = {
     "golden_circle": (
-        "\n\n思维模型【黄金圈法则】：按 Why（它为什么存在、解决什么根本问题）"
-        "→ How（它是怎么运作的）→ What（它到底是什么）的顺序引导；"
-        "当前这一问只推进其中一环，问题要具体，仍然只输出一个问题。"
+        "\n\nThinking model [Golden Circle]: guide in the order of Why (why does it "
+        "exist, what root problem does it solve) → How (how does it work) → What (what "
+        "is it really); advance only one step per question; be concrete; still output "
+        "only one question."
     ),
     "scenario": (
-        "\n\n思维模型【场景化提问】：把问题放进一个具体的生活场景里（比如买奶茶、"
-        "找工作、经营小店），用「如果……你会怎么做？」来引导，让抽象的概念落地；"
-        "仍然只输出一个问题。"
+        "\n\nThinking model [Scenario-based questioning]: place the question in a "
+        "concrete everyday scenario (buying bubble tea, job hunting, running a small "
+        "shop) and guide with \"what would you do if…?\" to make the abstract concept "
+        "tangible; still output only one question."
     ),
     "analogy": (
-        "\n\n思维模型【结构性类比】：先用「这就像……」引导学习者把当前概念"
-        "比作一个熟悉的东西，再追问两者的相似与关键差异，借此建立类比；"
-        "注意：让学习者自己说出类比，不要直接给出类比，仍然只输出一个问题。"
+        "\n\nThinking model [Structural analogy]: first use \"this is like…\" to get the "
+        "learner to compare the concept to something familiar, then probe the similarities "
+        "and key differences to build the analogy; note: have the learner come up with the "
+        "analogy themselves — don't hand it to them; still output only one question."
     ),
     "first_principles": (
-        "\n\n思维模型【第一性原理】：引导学习者把概念拆到不可再拆的基本事实，"
-        "用「它最底层的原理/基本事实是什么？」，撇开所有既有结论从零推导；"
-        "仍然只输出一个问题。"
+        "\n\nThinking model [First principles]: guide the learner to break the concept "
+        "down to its irreducible basic facts and derive it from scratch, setting aside "
+        "all existing conclusions; still output only one question."
     ),
 }
 
@@ -116,17 +124,18 @@ def warmup_prompt(
     """Build the concept warm-up: 1-2 plain-language sentences before starting
     (zero-basis / beginner mode only). Returns plain text.
     """
-    return f"""学习者是零基础，第一次接触这个概念。请用最生活化的大白话，
-先给他 1-2 句「预热」，让他对概念有一个最朴素的第一印象，再进入正式提问。
+    return f"""The learner is a complete beginner meeting this concept for the first time.
+In the most everyday, plain language, give them 1-2 sentences of "warm-up" so they get a
+simple first impression before the real questioning starts.
 
-当前学习的概念：{title}
-来源原文片段：
+Current concept being learned: {title}
+Source excerpt:
 {source_text}
 
-要求：
-- 用一句「用一句话说，{title} 就是……」，先把概念点破，别怕简单
-- 紧跟 1-2 句口语化的展开，像朋友随口解释一样
-- 不要出题、不要提问、不要输出 JSON，只要这一段预热话"""
+Requirements:
+- Start by cutting to the core with: "In one sentence, {title} is ..." — don't be afraid to keep it simple
+- Follow with 1-2 colloquial sentences, like a friend casually explaining it
+- Don't ask questions, don't probe, don't output JSON — only this warm-up paragraph"""
 
 
 
@@ -142,32 +151,33 @@ def opening_question_prompt(
     interest (answered in the app's two quick screening questions). Plain text.
     """
     level_desc = {
-        "zero": "完全没接触过这个概念，需要从最生活化的例子切入，问题要非常具体、门槛要低。",
-        "some": "听说过这个概念但不清楚，可以用一句话带过的日常场景来引出。",
-        "familiar": "对概念有一定认识，可以直接问一个稍有张力、能引发新思考的问题。",
+        "zero": "Has never touched this concept; needs the most everyday examples, very concrete, low entry barrier.",
+        "some": "Has heard of the concept but isn't clear on it; a one-line everyday scenario can introduce it.",
+        "familiar": "Has a fair grasp of the concept; can be asked a question with a bit of edge that sparks new thinking.",
     }[level]
     interest_desc = {
-        "simple": "学习者想先弄懂基本意思，问题要围绕“它到底是什么意思”展开。",
-        "deep": "学习者想深入理解，问题要围绕“它的本质/机制”展开。",
-        "example": "学习者想结合生活例子理解，问题要用一个具体场景提问。",
+        "simple": "Wants to first get the basic meaning; the question should revolve around \"what does it actually mean?\".",
+        "deep": "Wants to understand it deeply; the question should revolve around \"its essence / mechanism\".",
+        "example": "Wants to understand through real-life examples; ask using a concrete scenario.",
     }[interest]
     mode_hint = (
-        "用大白话、非常具体的小问题，一步步来，降低心理压力。"
+        "Use plain language and very concrete small questions, step by step, to lower the pressure."
         if mode == "beginner"
-        else "可以问得更有挑战性，但问题依然要具体。"
+        else "You can be more challenging, but keep the question concrete."
     )
-    return f"""现在是开场第一个问题，请根据下面的信息，为学习者量身定制。
+    return f"""This is the very first question. Tailor it to the learner based on the information below.
 
-当前学习的概念：{title}
-来源原文片段：
+Current concept being learned: {title}
+Source excerpt:
 {source_text}
 
-学习者的基础：{level_desc}
-学习者的兴趣：{interest_desc}
-出题风格：{mode_hint}
+Learner's baseline: {level_desc}
+Learner's interest: {interest_desc}
+Question style: {mode_hint}
 
-要求：结合上面的基础与兴趣，设计一个恰到好处的第一个问题——既不简单到无聊，也不难到劝退；
-要让学习者感到"这个问题有点意思"。只输出这一个问题，不要任何解释。"""
+Requirement: combine the baseline and interest above to design a first question that's
+just right — not so easy it's boring, not so hard it's discouraging; it should make the
+learner think "this is interesting." Output only this one question, with no explanation."""
 
 
 def question_prompt(
@@ -188,18 +198,18 @@ def question_prompt(
         raise ValueError(f"model must be one of {sorted(_MODEL_GUIDES)}, got {model}")
 
     if layer == 4:
-        related = "、".join(related_concepts) if related_concepts else "你之前学过的其他概念"
+        related = ", ".join(related_concepts) if related_concepts else "other concepts you've learned before"
         guide = _LAYER_GUIDES[4].format(related_concepts=related)
     else:
         guide = _LAYER_GUIDES[layer]
 
     parts = [
-        f"当前学习的概念：{title}",
-        f"来源原文片段：\n{source_text}",
+        f"Current concept being learned: {title}",
+        f"Source excerpt:\n{source_text}",
     ]
     if qa_history:
-        parts.append(f"学习者此前的回答历史：\n{qa_history}")
-    parts.append(f"【{_LAYER_NAMES[layer]}层追问】{guide}")
+        parts.append(f"The learner's previous answers:\n{qa_history}")
+    parts.append(f"【Layer {_LAYER_NAMES[layer]}】{guide}")
     if cognitive_contrast:
         parts.append(_COGNITIVE_CONTRAST_GUIDE.strip())
     if model is not None:
@@ -220,31 +230,32 @@ def check_answer_prompt(
 ) -> str:
     """Ask the AI to judge whether the learner's answer hit the point. Returns JSON."""
     attempt_note = (
-        "\n- 这是连续第 3 次答错，feedback 要更暖、更鼓励，避免打击；"
-        "下一轮将给出参考解释。"
+        "\n- This is the 3rd consecutive wrong answer; make the feedback warmer and "
+        "more encouraging so it doesn't deflate them; a reference explanation will "
+        "follow next round."
         if is_last_attempt
         else ""
     )
-    return f"""请判断学习者的回答是否抓住了要点，并用"有对话感"的方式反馈。
+    return f"""Judge whether the learner's answer hit the point, and respond in a conversational tone.
 
-学习的概念：{title}
-来源原文：
+Concept being learned: {title}
+Source text:
 {source_text}
 
-AI 刚才的问题：{question}
-学习者的回答：{answer}
+The question AI just asked: {question}
+The learner's answer: {answer}
 
-判断规则：
-- 方向正确即 is_correct 为 true，不要因细节不完整而判错
-- 答对时：feedback 要表现出"好奇 + 延伸"，像朋友聊天，例如
-  "你这个角度我没想过！那如果反过来，会怎样？"
-- 答错或偏题时：feedback 要"承认 + 挑战"，例如
-  "有意思，很多人都会这么想。那假如换个前提，会怎样？" 而不是冷冰冰地判错
-- hint 给一个方向性提示（不是答案，而是引导方向），只在错误或偏题时给出，否则为 null
-- 整体语气：温暖、自然、不评判，减少"考试感"，增加"对话感"{attempt_note}
+Judging rules:
+- If the direction is right, is_correct is true; don't mark wrong for missing minor details
+- On a correct answer: feedback should show "curiosity + extension", like chatting with a friend, e.g.
+  "I hadn't thought of that angle! What if it were reversed, then?"
+- On a wrong or off-topic answer: feedback should "acknowledge + challenge", e.g.
+  "Interesting, a lot of people think that way. What if we changed the premise?" instead of flatly marking it wrong
+- hint: give a directional hint (not the answer, just a direction to guide), only on wrong/off-topic answers, otherwise null
+- Overall tone: warm, natural, non-judgmental — less "exam", more "conversation"{attempt_note}
 
-只输出 JSON，格式：
-{{"is_correct": true或false, "feedback": "有对话感的反馈（1-2句）", "hint": "方向提示或null"}}"""
+Only output JSON in this format:
+{{"is_correct": true or false, "feedback": "conversational feedback (1-2 sentences)", "hint": "directional hint or null"}}"""
 
 
 # ------------------------------------------------------------ daily summary
@@ -255,16 +266,16 @@ def review_question_prompt(
     source_text: str,
 ) -> str:
     """Ask the AI to craft a tough, provocative review question for a concept."""
-    return f"""今天是复习日。请为这个概念出一道刁钻、有挑战性但不刁难人的复习题。
+    return f"""It's review day. Create a tricky, challenging-but-fair review question for this concept.
 
-学习的概念：{title}
-来源原文：
+Concept: {title}
+Source text:
 {source_text}
 
-要求：
-- 问题要能检验「学习者是真的懂了，还是只是背下来了」
-- 可以结合反事实（假如…会怎样）、认知反差、或和生活场景结合
-- 只输出这一个问题，不要任何解释、不要 JSON"""
+Requirements:
+- The question must test whether the learner truly understands it, not just memorized it
+- You may combine counterfactuals (what if…?), cognitive contrast, or everyday scenarios
+- Output only this one question, no explanation, no JSON"""
 
 
 def summary_prompt(
@@ -276,26 +287,29 @@ def summary_prompt(
 ) -> str:
     """Ask the AI to generate the daily summary. Returns JSON."""
     reading_block = (
-        f"\n阅读原文时用户自己的理解：\n{reading_answers}" if reading_answers else ""
+        f"\nThe learner's own understanding while reading:\n{reading_answers}" if reading_answers else ""
     )
-    return f"""今天的学习结束了。请根据以下内容生成每日总结。
+    return f"""Today's learning is finished. Generate the daily summary from the following.
 
-学习的概念：{title}
-用户的最终理解：{user_definition}
-追问记录：
+Concept: {title}
+The learner's final understanding: {user_definition}
+Q&A records:
 {qa_history}
 {reading_block}
 
-生成三项内容（总共不超过 3 句话）：
-1. breakthrough —— 一句"我终于搞懂了……"风格的话，用学习者自己的话总结今天最大的收获
-   （如果用户没写，帮他提炼成第一人称），要有"啊哈"的感觉
-2. plain —— 一句大白话复述这个概念，用生活化的类比或例子，让没学过的人也能秒懂
-3. tomorrow_hook —— 一个"好奇心钩子"：预告明天会追问一个更刁钻、更有意思的问题，
-   最好能和今天学的、或之前学过的概念产生关联，让人带着期待离开，例如
-   "如果机会成本不存在，你的每一次选择会变成什么样？"
+Produce three items (no more than 3 sentences total):
+1. breakthrough — one sentence in the style of "I finally got it…", summing up the day's
+   biggest takeaway in the learner's own voice (if they didn't write one, distill it for
+   them in first person); it should feel like an "aha"
+2. plain — a plain-language restatement of the concept using an everyday analogy or example
+   that someone who has never studied it can instantly understand
+3. tomorrow_hook — a "curiosity hook": hint that tomorrow's question will be even trickier
+   and more interesting, ideally linking to today's concept or something learned before, so
+   they leave with anticipation, e.g.
+   "If opportunity cost didn't exist, what would every one of your choices look like?"
 
-只输出 JSON，格式：
-{{"breakthrough": "一句话", "plain": "一句大白话（可为空）", "tomorrow_hook": "一个勾人下次再来的问题"}}"""
+Only output JSON in this format:
+{{"breakthrough": "one sentence", "plain": "plain restatement (may be empty)", "tomorrow_hook": "a hook that makes them want to come back"}}"""
 
 
 # ------------------------------------------------------------------ connections
@@ -307,20 +321,20 @@ def connections_prompt(
     all_concepts: list[str],
 ) -> str:
     """Ask the AI to recommend knowledge connections. Returns JSON array."""
-    concepts_text = "\n".join(f"- {c}" for c in all_concepts) or "（暂无）"
-    return f"""请为当前概念推荐可能的知识连接。
+    concepts_text = "\n".join(f"- {c}" for c in all_concepts) or "(none yet)"
+    return f"""Recommend possible knowledge connections for the current concept.
 
-当前概念：{title}
-概念要点：{source_text}
-用户目前已学过的概念列表：
+Current concept: {title}
+Concept essentials: {source_text}
+The learner's previously learned concepts:
 {concepts_text}
 
-找出 2-3 个与当前概念最有关系（同类 / 对比 / 因果 / 相关）的概念，
-并为每一条写清楚两者是什么关系。
-concept_title 必须是上面列表中出现过的标题。
+Find 2-3 concepts most related to the current one (same category / contrast / cause-effect /
+association), and clearly describe the relationship for each.
+concept_title must be a title from the list above.
 
-只输出 JSON 数组，格式：
-[{{"concept_title": "已学概念的标题", "relation_text": "两者的关系说明"}}]"""
+Only output a JSON array in this format:
+[{{"concept_title": "title from the list above", "relation_text": "description of the relationship"}}]"""
 
 
 # ------------------------------------------------------------------ reference
@@ -333,19 +347,20 @@ def reference_answer_prompt(
     attempts: int,
 ) -> str:
     """Ask the AI to give a clear reference explanation. Returns plain text."""
-    return f"""学习者在连续 {attempts} 次没能答上以下问题，请给出一段清晰、完整的参考解释。
+    return f"""The learner failed to answer the following question {attempts} times in a row.
+Give a clear, complete reference explanation.
 
-学习的概念：{title}
-来源原文：
+Concept: {title}
+Source text:
 {source_text}
 
-AI 刚才的问题：{question}
+The question AI just asked: {question}
 
-要求：
-- 直接给出概念的正确解释并回答这个问题，帮学习者理解
-- 简洁（3-5 句），直接陈述，不要再使用提问方式
-- 语气温柔，不要说"你答错了"之类的话，而是"我们一起把它想清楚"
-- 纯文本，不要输出 JSON"""
+Requirements:
+- Directly explain the concept correctly and answer the question so the learner understands
+- Keep it concise (3-5 sentences), make direct statements, don't use questions
+- Be gentle: don't say things like "you got it wrong"; instead, "let's think this through together"
+- Plain text, no JSON"""
 
 
 # ----------------------------------------------------------- deescalation
@@ -360,19 +375,19 @@ def simplify_question_prompt(
     """Ask the AI to rewrite the current question in a simpler, more concrete form.
     Returns plain text (the simplified question only).
     """
-    return f"""学习者刚才没答上来，请把这个问题"降维"成更简单、更具体、更好入手的问题。
+    return f"""The learner couldn't answer just now. Simplify this question into an easier, more concrete, more approachable one.
 
-学习的概念：{title}
-来源原文片段：
+Concept: {title}
+Source excerpt:
 {source_text}
 
-原来的问题：{question}
+Original question: {question}
 
-要求：
-- 换成更简单、更生活化、更具体的问法，让学习者有地方下手
-- 保留原来的追问目标（还在问同一个层面的东西），只是把台阶放低
-- 不要直接给出答案，依然是一个问题
-- 只输出这一个简化后的问题，不要任何解释"""
+Requirements:
+- Rephrase it in a simpler, more everyday, more concrete way so the learner has a place to start
+- Keep the original questioning goal (still probing the same thing), just lower the step
+- Don't give the answer; it stays a question
+- Output only this simplified question, no explanation"""
 
 
 def angle_shift_prompt(
@@ -383,19 +398,19 @@ def angle_shift_prompt(
     mode: str = "beginner",
 ) -> str:
     """Ask the AI to re-ask the same goal from a different angle. Returns plain text."""
-    return f"""学习者连续两次没答上来，请换个角度重新提问，帮助他"换个角度理解"。
+    return f"""The learner failed twice in a row. Re-ask from a different angle to help them "see it a new way".
 
-学习的概念：{title}
-来源原文片段：
+Concept: {title}
+Source excerpt:
 {source_text}
 
-原来的问题：{question}
+Original question: {question}
 
-要求：
-- 完全换一个切入点（比如：用具体例子 / 从反面问 / 从结果推原因）
-- 不再是同一句话换个说法，而是真正换一个角度
-- 依然只问一个问题，不给出答案
-- 只输出这一个问题，不要任何解释"""
+Requirements:
+- Switch to a completely different entry point (e.g., use a concrete example / ask from the opposite side / reason back from the outcome)
+- Not just rephrasing the same sentence — genuinely a different angle
+- Still ask only one question, no answers
+- Output only this one question, no explanation"""
 
 
 def explain_prompt(
@@ -407,19 +422,19 @@ def explain_prompt(
     """Ask the AI for a plain-language explanation when the learner clicks 我不懂.
     Returns plain text.
     """
-    return f"""学习者说"我不懂"，请用大白话、最生活化的方式给他解释一下。
+    return f"""The learner said "I don't get it." Explain it in the plainest, most everyday way you can.
 
-学习的概念：{title}
-来源原文片段：
+Concept: {title}
+Source excerpt:
 {source_text}
 
-他没听懂的问题：{question}
+The question they didn't understand: {question}
 
-要求：
-- 用大白话解释清楚，像给朋友讲明白一样
-- 先解释核心意思（1-2 句），再补一个生活中的例子（1-2 句）
-- 解释完轻轻问一句"这样是不是清楚一点了？"，然后不再继续追问
-- 纯文本，不要输出 JSON"""
+Requirements:
+- Explain it clearly in plain language, like explaining to a friend
+- First state the core meaning (1-2 sentences), then add an everyday example (1-2 sentences)
+- After explaining, gently ask "does that make it clearer?" and stop there — don't keep probing
+- Plain text, no JSON"""
 
 
 # --------------------------------------------------------------- V0.3.0 flow
@@ -427,12 +442,12 @@ def explain_prompt(
 # 深化追问。旧 prompt 全部保留；返回 JSON 的结构均由本模块的模型校验。
 
 _TEXT_TYPE_CHOICES = {
-    "concept": "一个独立的概念、术语（如「机会成本」）",
-    "definition": "一段对某个概念或事物的解释性说明",
-    "article": "一篇较长的文章、章节或资料",
-    "list": "一组并列的要点、步骤或清单",
-    "question": "一个问题、FAQ 或待解答的疑问",
-    "other": "其他类型的学习材料，尽量少用",
+    "concept": "a standalone concept or term (e.g., 'opportunity cost')",
+    "definition": "an explanatory passage about a concept or thing",
+    "article": "a longer article, chapter, or material",
+    "list": "a set of parallel points, steps, or a checklist",
+    "question": "a question, FAQ, or unresolved query",
+    "other": "other types of learning material — use sparingly",
 }
 
 
@@ -440,25 +455,26 @@ def detect_text_type_prompt(*, raw_text: str) -> str:
     """Classify the pasted material before learning starts. Returns JSON
     validated by :class:`TextTypeResult`.
     """
-    choices_text = "\n".join(f"- {k}：{v}" for k, v in _TEXT_TYPE_CHOICES.items())
-    return f"""请先判断学习者粘贴的这段材料属于哪种类型，以便用合适的方式学习。
+    choices_text = "\n".join(f"- {k}: {v}" for k, v in _TEXT_TYPE_CHOICES.items())
+    return f"""First classify the type of material the learner pasted, so it can be learned appropriately.
 
-粘贴的材料原文：
+Pasted material:
 {raw_text}
 
-类型可选值：
+Allowed types:
 {choices_text}
 
-要求：
-- 类型判断要贴近实际：独立术语/知识点选 concept；解释性段落选 definition；
-  较长或结构不强的选 article；并列要点选 list（这种通常可拆成多个概念）；
-  带问句的选 question；其余才选 other
-- title_hint：从材料中提取一个最适合当作概念标题的名词短语（1-8 个字），
-  提取不到就填空字符串
-- reason：用一句话说明为什么这么判断，不确定时也给一句简短说明
+Requirements:
+- Judge close to reality: standalone terms/knowledge points → concept; explanatory
+  passages → definition; longer or loosely structured → article; parallel points → list
+  (these can usually be split into multiple concepts); question-bearing → question;
+  everything else → other
+- title_hint: extract a noun phrase best suited as the concept title (1-8 words); if
+  none can be extracted, return an empty string
+- reason: explain the choice in one sentence; if unsure, still give a short note
 
-只输出 JSON，格式：
-{{"text_type": "concept", "title_hint": "标题提示或空字符串", "reason": "一句话理由或null"}}"""
+Only output JSON in this format:
+{{"text_type": "concept", "title_hint": "title hint or empty string", "reason": "one-sentence reason or null"}}"""
 
 
 def _legacy_validation_task_prompt(
@@ -470,24 +486,26 @@ def _legacy_validation_task_prompt(
     """Design one concrete validation task that checks real understanding rather
     than memorisation. Returns JSON validated by :class:`ValidationTask`.
     """
-    history_text = qa_history or "（暂无可用的追问记录）"
-    return f"""基本学习已经完成。请设计一个「验证任务」，检验学习者是真的搞懂了概念，而不是背下来了。
+    history_text = qa_history or "(no usable Q&A history yet)"
+    return f"""Basic learning is done. Design a "validation task" that checks whether the learner truly understood the concept instead of memorizing it.
 
-学习的概念：{title}
-来源原文：
+Concept: {title}
+Source text:
 {source_text}
-此前的追问记录：
+Previous Q&A history:
 {history_text}
 
-要求：
-- 任务必须无法靠背答案蒙混：可以是「用一句话向完全没听过的人解释」（费曼）、
-  「判断某个例子里是否发生了这个现象并说明理由」、「预测某个场景的结果」等
-- 只给一个任务，不要拆成选择题，不要列出选项
-- target 写清楚「一个正确理解应包含的关键点」，供后续判断学习者的回答是否到位
-- 语气自然，像朋友递给他的一个小挑战
+Requirements:
+- The task must be impossible to fake by reciting the answer: e.g., "explain it in one
+  sentence to someone who has never heard of it" (Feynman), "judge whether a given
+  example contains this phenomenon and say why", "predict the outcome of a scenario", etc.
+- Give exactly one task — don't split it into multiple-choice, don't list options
+- target must spell out "the key points a correct understanding should include", to be
+  used later to judge whether the answer is adequate
+- Natural tone, like a friend handing them a small challenge
 
-只输出 JSON，格式：
-{{"task": "验证任务（具体、可执行）", "target": "正确理解应包含的关键点，1-2句"}}"""
+Only output JSON in this format:
+{{"task": "validation task (specific and doable)", "target": "key points a correct understanding should include, 1-2 sentences"}}"""
 
 
 def _legacy_validate_answer_prompt(
@@ -502,26 +520,29 @@ def _legacy_validate_answer_prompt(
     :class:`LegacyValidateAnswerResult`.
     """
     attempt_note = (
-        f"\n- 这是最后一次机会（还可重试 {attempts_left} 次），feedback 要更暖、更鼓励"
+        f"\n- This is the last chance (can still retry {attempts_left} more times); "
+        f"make the feedback warmer and more encouraging"
         if attempts_left is not None and attempts_left <= 1
         else ""
     )
-    return f"""请判断学习者在「验证任务」中的回答是否体现了真正的理解。
+    return f"""Judge whether the learner's answer to the "validation task" reflects genuine understanding.
 
-学习的概念：{title}
-验证任务：{task}
-正确理解应包含的关键点：{target}
-学习者的回答：{answer}
+Concept: {title}
+Validation task: {task}
+Key points a correct understanding should include: {target}
+The learner's answer: {answer}
 
-判断规则：
-- 回答是否覆盖 target 里的关键点；方向对、能用学习者自己的话说得通道理即 is_correct 为 true
-- 不必逐字逐句，重点是「学习者自己的话说得出」
-- 答对时 feedback 表示欣赏与延伸，像朋友聊天
-- 答错或偏题时 feedback 温和指出差距，missing 用 1 句话点出少了哪个关键点
-- 整体语气温暖、不评判，减少考试感{attempt_note}
+Judging rules:
+- Does the answer cover the key points in target? If the direction is right and they can
+  reason it through in their own words, is_correct is true
+- No need for word-for-word matching; what matters is "can the learner say it in their own words"
+- On a correct answer, feedback shows appreciation and extension, like a friend chatting
+- On a wrong or off-topic answer, gently point out the gap; missing names in one sentence
+  which key point was left out
+- Overall tone: warm, non-judgmental, less exam-like{attempt_note}
 
-只输出 JSON，格式：
-{{"is_correct": true或false, "feedback": "有对话感的反馈（1-2句）", "missing": "缺失的关键点或null"}}"""
+Only output JSON in this format:
+{{"is_correct": true or false, "feedback": "conversational feedback (1-2 sentences)", "missing": "the missing key point or null"}}"""
 
 
 def simplify_explanation_prompt(
@@ -533,51 +554,51 @@ def simplify_explanation_prompt(
     """Rewrite the explanation (or the concept itself) one notch simpler, in the
     most everyday language. Returns plain text.
     """
-    prev = f"（学习者仍觉得不够简单，之前的解释是：\n{explanation}）" if explanation else ""
-    return f"""学习者表示「讲得不够简单」，请把概念解释再降一个台阶，用最生活化的大白话重新讲一遍。
+    prev = f"(The learner still finds it too hard; the previous explanation was:\n{explanation})" if explanation else ""
+    return f"""The learner says "that's still not simple enough." Bring the explanation down another notch and re-explain it in the most everyday plain language.
 
-学习的概念：{title}
-来源原文片段：
+Concept: {title}
+Source excerpt:
 {source_text}
 {prev}
 
-要求：
-- 用比上次更简单的生活化语言，像给朋友解释一样
-- 先一句话说清核心意思，再用一个具体的日常例子（比如买奶茶、点外卖、开店算账）
-- 语气轻一点，可以自嘲式地承认「我之前可能说得有点绕」，降低压力
-- 结尾轻轻问一句「这样是不是顺多了？」，然后不要再提问
-- 纯文本，不要输出 JSON"""
+Requirements:
+- Use even simpler everyday language than last time, like explaining to a friend
+- First state the core meaning in one sentence, then use a concrete daily example (bubble tea, food delivery, running a small shop's books)
+- Lighten the tone; you may self-deprecatingly admit "I might have been a bit roundabout earlier" to lower the pressure
+- End by gently asking "does that flow better now?" and stop — no more questions
+- Plain text, no JSON"""
 
 
 _DEEPER_QUESTION_GUIDES: dict[str, str] = {
     "verification_plus": (
-        "用一个新的、他没见过的场景或反例再验证一次理解，"
-        "看他能不能在变通的场合认出这个概念，问题要具体。"
+        "Verify understanding once more with a new scenario or counterexample they haven't "
+        "seen, to check whether they can recognize the concept in a shifted context; be concrete."
     ),
     "connection": (
-        "把他以前学过的相关概念拿出来，问一个「它和你之前学的 X 有什么联系或区别」"
-        "的问题，引导他把新知识连成网。"
+        "Bring up a related concept they learned before and ask \"what connects or separates "
+        "it from X you learned earlier?\" to help them weave new knowledge into a web."
     ),
     "counterfactual": (
-        "做反事实推演：假如没有这个概念（它不存在），会发生什么？"
-        "从反面引导他看清这个概念的价值。"
+        "Run a counterfactual: if this concept didn't exist, what would happen? Lead them "
+        "from the opposite side to see the concept's value."
     ),
     "action": (
-        "把概念推进到一个具体的行动决策：「如果明天他要在真实生活里做一个相关的"
-        "决定，他会怎么用上它？」让概念落到真实的选择上。"
+        "Push the concept into a concrete decision: \"if you had to make a related decision "
+        "in real life tomorrow, how would you use it?\" Land the concept on real choices."
     ),
     "first_principles": (
-        "引导他把概念拆到不可再拆的基本事实，从最底层重新推导一遍，"
-        "撇开背下来的结论。"
+        "Guide them to break the concept down to irreducible basic facts and re-derive it "
+        "from the ground up, setting aside memorized conclusions."
     ),
 }
 
 _DEEPER_QUESTION_NAMES = {
-    "verification_plus": "再验证",
-    "connection": "联系",
-    "counterfactual": "反事实",
-    "action": "行动",
-    "first_principles": "第一性原理",
+    "verification_plus": "Re-verify",
+    "connection": "Connection",
+    "counterfactual": "Counterfactual",
+    "action": "Action",
+    "first_principles": "First principles",
 }
 
 DEEPER_QUESTION_ORDER: tuple[str, ...] = (
@@ -603,14 +624,15 @@ def _legacy_deeper_question_prompt(
             f"got {question_type}"
         )
     parts = [
-        f"当前学习的概念：{title}",
-        f"来源原文片段：\n{source_text}",
+        f"Current concept being learned: {title}",
+        f"Source excerpt:\n{source_text}",
     ]
     if qa_history:
-        parts.append(f"学习者此前的回答记录：\n{qa_history}")
-    parts.append(f"【{_DEEPER_QUESTION_NAMES[question_type]}层深化】{_DEEPER_QUESTION_GUIDES[question_type]}")
+        parts.append(f"The learner's previous answers:\n{qa_history}")
+    parts.append(f"【Deeper probe: {_DEEPER_QUESTION_NAMES[question_type]}】{_DEEPER_QUESTION_GUIDES[question_type]}")
     parts.append(
-        "要求：只输出这一个深化问题，具体、有画面感、略有挑战但不刁难，不要任何解释。"
+        "Requirement: output only this one deeper question — concrete, vivid, slightly "
+        "challenging but not harsh, with no explanation."
     )
     return "\n\n".join(parts)
 
@@ -622,10 +644,11 @@ def _legacy_deeper_question_prompt(
 # V0.3.1 hotfix — 深化追问按回答丰富度分级：回答越简短，追问越生活化；
 # 回答越深入，追问越往前推（类比 → 联系 → 反事实）。
 DEEPENING_LEVEL_GUIDES: dict[str, str] = {
-    "simple": "生活类比：用一件日常熟悉的东西打比方，问「这就像什么？」让概念落地到身边。",
-    "moderate": "联系：把概念与他已学过的相关概念或生活场景连起来，问「这和什么有关？」",
-    "rich": "反事实：让他想象「如果没有这个概念，会发生什么？」，从反面看清概念的价值。",
+    "simple": "Everyday analogy: compare it to something familiar in daily life and ask \"what is this like?\" so the concept lands close to home.",
+    "moderate": "Connection: link the concept to ones they've learned or to real-life scenes, asking \"what does this relate to?\"",
+    "rich": "Counterfactual: have them imagine \"what would happen if this concept didn't exist?\" to see its value from the opposite side.",
 }
+
 
 def _fill(template: str, **kwargs: str) -> str:
     """Replace ``{name}`` placeholders. JSON braces in the template are safe."""
@@ -644,38 +667,40 @@ def validation_task_prompt(
     """Generate one low-cost task that verifies real understanding (not rote
     recall). Returns JSON validated by :class:`ValidationTask`."""
     reading_block = (
-        f"\n用户阅读时自己的理解（可参考，验证任务要针对他还没抓住的地方）：\n{reading_answers}"
+        f"\nThe learner's own understanding while reading (reference only; the task "
+        f"should target what they haven't grasped):\n{reading_answers}"
         if reading_answers
         else ""
     )
     return _fill(
-        """你是 RecallOS 的学习任务设计器。
+        """You are RecallOS's learning-task designer.
 
-根据 source_text 生成一个验证任务，用来判断用户是否真正理解内容，而不是单纯记忆原文。
+Based on source_text, create a validation task that determines whether the user truly
+understands the content rather than just memorizing the source.
 
-优先选择最适合当前内容的任务类型，例如：
-- summary：用自己的话概括
-- translation：解释专业表达
-- analogy：用生活例子解释
-- application：说明如何应用
-- comparison：比较两个概念
-- prediction：预测某种情况下会发生什么
+Prefer the task type that best fits the content, for example:
+- summary: summarize in your own words
+- translation: explain the jargon
+- analogy: explain with an everyday example
+- application: say how to apply it
+- comparison: compare two concepts
+- prediction: predict what happens in a given situation
 
-规则：
-1. 任务必须能独立回答。
-2. 优先要求用户使用自己的话。
-3. 避免直接要求复述原文。
-4. 难度：1=基础理解，2=关系理解，3=较高阶理解。
-5. 只生成一个任务。
-6. 只输出合法 JSON。
+Rules:
+1. The task must be answerable on its own.
+2. Prefer requiring the user to use their own words.
+3. Avoid asking for a direct recitation of the source.
+4. Difficulty: 1=basic understanding, 2=relational understanding, 3=higher-order understanding.
+5. Generate only ONE task.
+6. Only output valid JSON.
 
-输入：
+Input:
 concept: {concept}
 source_text: {source_text}
 text_type: {text_type}{reading_block}
 
-输出 JSON 格式：
-{"task": "不用原文中的句子，用自己的话解释这个概念为什么重要。", "type": "summary", "difficulty": 2}""",
+Output JSON format:
+{"task": "In your own words — not the words from the source — explain why this concept matters.", "type": "summary", "difficulty": 2}""",
         source_text=source_text,
         concept=concept,
         text_type=text_type or "concept",
@@ -696,47 +721,48 @@ def learner_state_analyzer_prompt(
 ) -> str:
     """Analyse the learner's closed-book explanation into a Learner State
     snapshot. Returns JSON validated by :class:`LearnerStateAnalysis`."""
-    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    context_block = f"\n\nPrevious conversation:\n{context}" if context else ""
     goal_hint = {
-        "understand": "目标：理解概念本身。达到 relationship（能讲清概念之间的关系/条件）即算达标。",
-        "connect": "目标：建立联系。需要用户把概念与其他概念、场景或条件联系起来才算达标。",
-        "apply": "目标：能实际应用。达到 application（能说明如何用于真实情境）才算达标。",
-        "exam": "目标：为考试掌握。要求表达严谨、术语准确、无遗漏才算达标。",
-    }.get(learning_goal, "目标：理解概念本身。")
-    stuck_block = f"\n阅读时用户自述卡住的地方（请据此补充 uncertain）：\n{stuck_points}" if stuck_points else ""
-    confidence_block = f"\n用户在解释前自评：{confidence_prediction}（判断时可参考其校准情况）" if confidence_prediction else ""
+        "understand": "Goal: understand the concept itself. Reaching relationship (can explain how the concept relates to others / its conditions) is enough.",
+        "connect": "Goal: build connections. The learner must relate the concept to other concepts, scenarios, or conditions.",
+        "apply": "Goal: apply it in practice. Reaching application (can say how to use it in a real situation) is enough.",
+        "exam": "Goal: master it for an exam. Requires precise expression, accurate terms, and no omissions.",
+    }.get(learning_goal, "Goal: understand the concept itself.")
+    stuck_block = f"\nPlaces the learner said they got stuck while reading (use these to fill uncertain):\n{stuck_points}" if stuck_points else ""
+    confidence_block = f"\nLearner's self-assessment before explaining: {confidence_prediction} (you may use it to gauge calibration)" if confidence_prediction else ""
     return _fill(
-        """你是 RecallOS 的学习者状态分析器。
+        """You are RecallOS's learner-state analyzer.
 
-任务：根据原文和用户刚给出的闭卷解释，判断用户真正理解了什么、哪里不确定、哪里存在误解。
-不要只检查关键词；要判断用户是否真正表达了概念含义。
+Task: based on the source text and the learner's closed-book explanation just given,
+judge what they truly understand, where they're uncertain, and where they have misconceptions.
+Don't just check keywords; judge whether they actually expressed the concept's meaning.
 
-理解层级：
-- surface：主要复述原文/关键词，没有明显自己的理解
-- relationship：能解释概念与其他概念、条件或结果之间的关系
-- application：能说明这个概念如何用于实际情况
-- essence：能解释概念为什么成立、解决什么问题或底层逻辑
+Understanding levels:
+- surface: mostly parroting the source/keywords, no clear understanding of their own
+- relationship: can explain how the concept relates to other concepts, conditions, or outcomes
+- application: can explain how the concept applies to real situations
+- essence: can explain why the concept holds, what problem it solves, or its underlying logic
 
 {goal_hint}
 
-规则：
-1. 以 source_text 为主要依据，不凭常识替换原文含义。
-2. 表达方式不同但含义正确，应判为理解。
-3. 有核心误解时写入 misconceptions。
-4. 不因回答简短而降低层级判断。
-5. 用户自述卡住的地方应尽量保留在 uncertain 里。
-6. understood / uncertain / misconceptions 各自只列最重要的 1-3 条，用短句。
-7. 只输出合法 JSON，不要 Markdown 或解释。
+Rules:
+1. Base judgment on source_text; don't substitute the source's meaning with common sense.
+2. Different wording with correct meaning counts as understanding.
+3. Write core misconceptions into misconceptions.
+4. Don't lower the level just because the answer is short.
+5. Keep the learner's self-reported stuck points in uncertain when possible.
+6. understood / uncertain / misconceptions should each list only the most important 1-3 items, in short phrases.
+7. Only output valid JSON, no Markdown or explanation.
 
-输入：
+Input:
 concept: {concept}
 source_text: {source_text}
 task: {task}
 user_answer: {user_answer}
-学习目标：{goal_hint}{stuck_block}{confidence_block}{context_block}
+Learning goal: {goal_hint}{stuck_block}{confidence_block}{context_block}
 
-输出 JSON 格式：
-{"understanding_level": "relationship", "understood": ["理解了选择与放弃之间的关系"], "uncertain": ["没有明确理解机会成本只关注最佳替代方案"], "misconceptions": [], "last_response_quality": "partial"}""",
+Output JSON format:
+{"understanding_level": "relationship", "understood": ["understands the relationship between choice and what's given up"], "uncertain": ["hasn't clearly understood that opportunity cost is only about the best alternative"], "misconceptions": [], "last_response_quality": "partial"}""",
         concept=concept,
         source_text=source_text,
         task=task,
@@ -762,52 +788,52 @@ def validation_feedback_prompt(
     """
     reading_context = ""
     if reading_answers:
-        answers_text = "、".join(
-            f"第{i + 1}段：{a['answer']}" for i, a in enumerate(reading_answers)
+        answers_text = ", ".join(
+            f"paragraph {i + 1}: {a['answer']}" for i, a in enumerate(reading_answers)
         )
-        reading_context = f"用户在阅读时的理解：{answers_text}\n"
+        reading_context = f"The learner's understanding while reading: {answers_text}\n"
     return _fill(
-        """你是一位苏格拉底式导师。用户正在学习「{concept_title}」。
+        """You are a Socratic mentor. The learner is studying "{concept_title}".
 
-验证任务：
+Validation task:
 {task_description}
 
-{reading_context}用户的回答：
+{reading_context}The learner's answer:
 {user_answer}
 
-请评估用户的回答，并给出**具体、可行动、有对比**的反馈。
+Evaluate the answer and give feedback that is **specific, actionable, and comparative**.
 
-评估维度：
-1. **核心概念**：用户是否抓住了「{concept_title}」的本质？（对/部分/不对）
-2. **表达方式**：用户是否用自己的话说出了理解？（是/部分/否）
-3. **视角丰富度**：用户是否从多个角度理解？（是/部分/否）
+Evaluation dimensions:
+1. **Core concept**: did they capture the essence of "{concept_title}"? (yes/partially/no)
+2. **Expression**: did they explain it in their own words? (yes/partially/no)
+3. **Perspective richness**: did they approach it from multiple angles? (yes/partially/no)
 
-反馈格式（严格按以下结构）：
+Feedback format (follow this structure strictly):
 ---
-**你的回答提到了：**
-[列举用户回答里的有效要点，用 • 列出]
+**Your answer mentioned:**
+[list the valid points from the learner's answer, using • bullets]
 
-**但机会成本的核心在于：**
-[用一句话说出概念本质]
+**But the core of {concept_title} is:**
+[state the essence of the concept in one sentence]
 
-**对比：**
-你说的是「[用户的表述]」
-而机会成本更准确的说法是「[正确表述]」
+**Compare:**
+You said "[the learner's wording]"
+While a more accurate way to say {concept_title} is "[correct wording]"
 
-**试着想想这个例子：**
-[给出一个具体、与用户回答相关的场景例子]
+**Try this example:**
+[give a specific example related to the learner's answer]
 
-**所以：**
-[总结用户的理解程度：基本到位 / 方向对但需要调整 / 需要重新理解]
+**So:**
+[summarize how well they understand: basically there / right direction but needs adjusting / needs to relearn]
 
 ---
-**重要规则：**
-- 永远不要只说「对了」或「错了」
-- 永远不要只说「理解不到位」而不解释
-- 必须给出具体对比（用户说的 vs. 正确的）
-- 必须给出具体例子
-- 语气要像朋友，不要像考官
-- 如果用户的答案有多种正确表述方式，接受它们。""",
+**Important rules:**
+- Never just say "right" or "wrong"
+- Never just say "not quite there" without explaining why
+- Always give a concrete comparison (what they said vs. what's correct)
+- Always give a concrete example
+- Sound like a friend, not an examiner
+- Accept any correct wording of the learner's answer.""",
         concept_title=concept_title,
         user_answer=user_answer,
         task_description=task_description,
@@ -838,27 +864,28 @@ def intervention_decider_prompt(
     latest answer (simple/moderate/rich). The decider must then push with a
     question of that depth instead of a generic one.
     """
-    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    context_block = f"\n\nPrevious conversation:\n{context}" if context else ""
     history_block = (
-        f"\n\n用户对已给干预的反馈（用于选择下一种干预方式）：\n{intervention_history}"
+        f"\n\nThe learner's feedback on the interventions given (use it to pick the next type):\n{intervention_history}"
         if intervention_history
         else ""
     )
     richness_block = (
-        f"\n\n用户上一次回答的丰富度：{answer_richness}（{DEEPENING_LEVEL_GUIDES.get(answer_richness, '')}）"
+        f"\n\nRichness of the learner's last answer: {answer_richness} ({DEEPENING_LEVEL_GUIDES.get(answer_richness, '')})"
         if answer_richness in DEEPENING_LEVEL_GUIDES
         else ""
     )
     mode_hint = (
-        "当前处于验证阶段：目标是确认/修复对核心含义的理解。"
+        "Current stage is validation: the goal is to confirm or repair understanding of the core meaning."
         if mode == "validation"
-        else "当前处于深入阶段：目标是找到当前理解层级之上、最值得推进的那一个缺口。"
+        else "Current stage is deepening: the goal is to find the one gap worth pushing on above the current understanding level."
     )
     if minimum_action in INTERVENTION_LABELS:
         extra = [
             (
-                f"3. 上次干预未让用户进步：本次 action 的强度不得低于「{minimum_action}"
-                f"（{INTERVENTION_LABELS[minimum_action]}）」，从这一级起步。"
+                f"3. The last intervention did not help the learner progress: this time "
+                f"the action must be at least as strong as \"{minimum_action}"
+                f" ({INTERVENTION_LABELS[minimum_action]})\" — start from this level."
             )
         ]
         base = 4
@@ -866,45 +893,47 @@ def intervention_decider_prompt(
         extra = []
         base = 3
     rules = [
-        "1. 能用更低优先级解决，就绝不用更高优先级（能用一句话提示解决，就不要给例子；能用一个例子解决，就不要解释完整答案）。",
-        "2. 只有当更低优先级的干预无效时，才能使用更高优先级的干预。",
+        "1. Never use a heavier intervention when a lighter one will do (if a one-line hint works, don't give an example; if one example works, don't explain the full answer).",
+        "2. Only escalate to a heavier intervention once the lighter one has failed.",
     ]
     rules += extra
     rules += [
-        f"{base}. content 只给\"刚好让用户能继续思考\"的内容，绝不直接给出完整答案。",
-        f"{base + 1}. 用户仍有缺口但干预已没有价值时，action=none 并结束。",
-        f"{base + 2}. requires_user_response：需要用户重新回答时为 true；直接给出收尾解释时为 false。",
-        f"{base + 3}. 参考过往干预反馈：用户对某类干预（类比/例子/提示/反例）说\"清楚多了\"时，优先再用同类的更简单版本；对某类说\"还是有点懵\"时，换一种方式。",
-        f"{base + 4}. 只输出合法 JSON。",
+        f"{base}. content should only give \"just enough to keep the learner thinking\" — never the full answer.",
+        f"{base + 1}. When gaps remain but another intervention is no longer valuable, set action=none and finish.",
+        f"{base + 2}. requires_user_response: true when the learner should answer again; false when you're directly giving a closing explanation.",
+        f"{base + 3}. Use past intervention feedback: when the learner said a certain type (analogy/example/hint/counterexample) \"got much clearer\", prefer a simpler version of the same type; when they said \"still confused\", switch to a different type.",
+        f"{base + 4}. Only output valid JSON.",
     ]
     rules_block = "\n".join(rules)
     return _fill(
-        """你是 RecallOS 的最小干预决策器。
+        """You are RecallOS's minimal-intervention decider.
 
-先回答：「这个用户现在最需要什么？」再决定是否值得干预、用什么最小干预。
+First answer: "What does this learner need most right now?" Then decide whether an
+intervention is worthwhile and what the minimal one is.
 
-不要机械地"答对→下一题，答错→再问"。只有在存在真实且有价值的理解缺口时才干预。
+Don't mechanically do "right → next question, wrong → ask again." Only intervene when
+there is a real, valuable understanding gap.
 
-干预强度优先级（从低到高，低=更轻）：
-hint（一句话提示）→ example（具体例子）→ analogy（类比）→ counterexample（反例）→ question（直接提问）
+Intervention intensity ladder (low to high; low = lighter):
+hint (one-line hint) → example (concrete example) → analogy (analogy) → counterexample (counterexample) → question (direct question)
 
-强制规则：
+Mandatory rules:
 {rules}
 
 {mode_hint}
 
-输入：
+Input:
 concept: {concept}
 source_text: {source_text}
-当前目标：{current_target}
+Current target: {current_target}
 learner_state: {learner_state}{history_block}{context_block}{richness_block}
 
-输出 JSON 格式：
-{"action": "counterexample", "reason": "用户理解了基本关系，但无法识别概念边界", "content": "如果你放弃了三个选择，机会成本是不是三个选择加起来？为什么？", "requires_user_response": true}""",
+Output JSON format:
+{"action": "counterexample", "reason": "the learner gets the basic relationship but can't identify the concept's boundaries", "content": "If you give up three options, is the opportunity cost all three added together? Why?", "requires_user_response": true}""",
         concept=concept,
         source_text=source_text,
         learner_state=learner_state,
-        current_target=current_target or "验证任务",
+        current_target=current_target or "validation task",
         mode_hint=mode_hint,
         rules=rules_block,
         history_block=history_block,
@@ -925,43 +954,44 @@ def learner_state_updater_prompt(
 ) -> str:
     """Update the Learner State from the learner's newest answer. Returns JSON
     validated by :class:`LearnerStateUpdate`."""
-    context_block = f"\n\n此前的对话记录：\n{context}" if context else ""
+    context_block = f"\n\nPrevious conversation:\n{context}" if context else ""
     goal_hint = {
-        "understand": "目标：理解概念本身，达到 relationship 即算达标。",
-        "connect": "目标：建立联系，需要能联系到其他概念/场景。",
-        "apply": "目标：能实际应用，达到 application 才算达标。",
-        "exam": "目标：为考试掌握，要求表达严谨、术语准确。",
+        "understand": "Goal: understand the concept itself; reaching relationship is enough.",
+        "connect": "Goal: build connections; must be able to relate it to other concepts/scenarios.",
+        "apply": "Goal: apply it in practice; reaching application is enough.",
+        "exam": "Goal: master it for an exam; requires precise expression and accurate terms.",
     }.get(learning_goal, "")
     return _fill(
-        """你是 RecallOS 的学习状态更新器。
+        """You are RecallOS's learner-state updater.
 
-根据用户对上次干预的最新回答，更新学习者状态。只给出基于这次最新回答的新快照，
-不要机械地把历史条目复制进来。理解层级可以在原有基础上提升，也可以保持不变或更低。
+Update the learner state from the learner's latest answer to the last intervention.
+Only give a fresh snapshot based on this newest answer; don't mechanically copy past
+entries. The understanding level may rise, stay the same, or fall.
 
-理解层级：
-- surface：复述定义或关键词
-- relationship：解释概念之间的关系
-- application：能够将概念用于具体情境
-- essence：理解底层逻辑、因果机制或存在原因
+Understanding levels:
+- surface: restating a definition or keywords
+- relationship: explaining relationships between concepts
+- application: being able to apply the concept to concrete situations
+- essence: understanding the underlying logic, causal mechanism, or reason it exists
 
-next_best_action 是 AI 下一步最值得做的动作：none / hint / analogy / example / counterexample / question。
+next_best_action is the AI's most valuable next move: none / hint / analogy / example / counterexample / question.
 
 {goal_hint}
 
-规则：
-1. 不以回答长短判断质量。
-2. 正确但机械复述，只能算 surface。
-3. 只输出合法 JSON。
+Rules:
+1. Don't judge quality by answer length.
+2. Correct but mechanical restating only counts as surface.
+3. Only output valid JSON.
 
-输入：
+Input:
 concept: {concept}
 source_text: {source_text}
-上次干预：{intervention}
+Last intervention: {intervention}
 user_answer: {user_answer}
 learner_state: {learner_state}{context_block}
 
-输出 JSON 格式：
-{"understanding_level": "application", "understood": ["理解机会成本与选择有关", "能够识别具体情境中的机会成本"], "uncertain": [], "misconceptions": [], "last_response_quality": "deep", "next_best_action": "none"}""",
+Output JSON format:
+{"understanding_level": "application", "understood": ["understands that opportunity cost relates to choices", "can spot opportunity cost in specific situations"], "uncertain": [], "misconceptions": [], "last_response_quality": "deep", "next_best_action": "none"}""",
         concept=concept,
         source_text=source_text,
         intervention=intervention,
@@ -980,25 +1010,26 @@ def deepening_offer_prompt(
     """Ask the learner whether to keep going deeper after validation passes.
     Returns JSON validated by :class:`DeepeningOffer`."""
     return _fill(
-        """你是 RecallOS 的学习教练。
+        """You are RecallOS's learning coach.
 
-用户已经基本理解「{concept}」。请生成一句自然、有吸引力的继续深入邀请，让用户自己选择是否继续。
+The learner already basically understands "{concept}". Generate one natural, inviting
+offer to go deeper, and let them choose.
 
-要求：
-1. 必须体现"你已经理解核心"。
-2. 暗示继续深入能获得什么价值。
-3. 不使用"你想不想"。
-4. 不制造压力。
-5. 最多 25 个中文字符。
-6. 根据 understanding_level 调整表达。
-7. 只输出合法 JSON。
+Requirements:
+1. It must convey "you already get the core."
+2. Hint at the value of going deeper.
+3. Don't use "do you want to".
+4. No pressure.
+5. At most 25 words.
+6. Adjust the tone to understanding_level.
+7. Only output valid JSON.
 
-输入：
+Input:
 concept: {concept}
 understanding_level: {understanding_level}
 
-输出 JSON 格式：
-{"offer": "你已经抓住核心，要不要再挖一层，看看它为什么成立？", "options": ["深入", "先到这里"]}""",
+Output JSON format:
+{"offer": "You've got the core — want to go one layer deeper and see why it holds?", "options": ["Go deeper", "That's enough"]}""",
         concept=concept,
         understanding_level=understanding_level,
     )
@@ -1022,23 +1053,24 @@ def deepening_question_prompt(
         raise ValueError(
             f"level must be one of {sorted(DEEPENING_LEVEL_GUIDES)}, got {level!r}"
         )
-    history_block = f"\n学习者此前的回答记录：\n{qa_history}" if qa_history else ""
+    history_block = f"\nThe learner's previous answers:\n{qa_history}" if qa_history else ""
     level_block = (
-        f"\n当前理解层级：{understanding_level}" if understanding_level else ""
+        f"\nCurrent understanding level: {understanding_level}" if understanding_level else ""
     )
     return _fill(
-        """你是 RecallOS 的学习教练。
+        """You are RecallOS's learning coach.
 
-用户刚对「{concept}」做过一次输出。请根据其回答的丰富度，生成一道刚好能把他往前推一步的深化追问。
+The learner just made an output about "{concept}". Based on the richness of that answer,
+craft a deeper follow-up question that moves them exactly one step forward.
 
 {guide}
 
-要求：
-1. 只输出这一道深化问题本身，具体、有画面感、略有挑战但不刁难。
-2. 严格按上面的层级方式追问，不要跳级。
-3. 不要输出任何解释、标题或 JSON。
+Requirements:
+1. Output only this one deeper question — concrete, vivid, slightly challenging but not harsh.
+2. Follow the level guide above strictly; don't skip levels.
+3. No explanations, headings, or JSON.
 
-输入：
+Input:
 concept: {concept}
 source_text: {source_text}{level_block}{history_block}""",
         concept=concept,
@@ -1166,11 +1198,11 @@ INTERVENTION_LADDER: tuple[str, ...] = (
     "question",
 )
 INTERVENTION_LABELS: dict[str, str] = {
-    "hint": "一句话提示",
-    "example": "具体例子",
-    "analogy": "类比",
-    "counterexample": "反例",
-    "question": "直接提问",
+    "hint": "One-line hint",
+    "example": "Concrete example",
+    "analogy": "Analogy",
+    "counterexample": "Counterexample",
+    "question": "Direct question",
 }
 
 
@@ -1203,7 +1235,7 @@ class DeepeningOffer(RecallBaseModel):
     """Validated output of :func:`deepening_offer_prompt`."""
 
     offer: NonEmptyStr
-    options: list[NonEmptyStr] = Field(default_factory=lambda: ["深入", "先到这里"])
+    options: list[NonEmptyStr] = Field(default_factory=lambda: ["Go deeper", "That's enough"])
 
 
 __all__ = [
